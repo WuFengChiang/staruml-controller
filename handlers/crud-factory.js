@@ -101,6 +101,9 @@ function defaultSerializeNode(elem) {
         _type: elem.constructor.name,
         name: elem.name || ''
     }
+    if (elem.stereotype) {
+        result.stereotype = elem.stereotype
+    }
     if (elem.documentation) {
         result.documentation = elem.documentation
     }
@@ -119,6 +122,9 @@ function defaultSerializeRelation(elem, config) {
         _id: elem._id,
         _type: elem.constructor.name,
         name: elem.name || ''
+    }
+    if (elem.stereotype) {
+        result.stereotype = elem.stereotype
     }
     if (elem.documentation) {
         result.documentation = elem.documentation
@@ -562,7 +568,7 @@ function makeListResource(config, res) {
 }
 
 function makeCreateResource(config, res) {
-    const allowedFields = ['diagramId', 'name', 'x1', 'y1', 'x2', 'y2', 'tailViewId', 'lineColor', 'fillColor', 'fontColor']
+    const allowedFields = ['diagramId', 'name', 'stereotype', 'x1', 'y1', 'x2', 'y2', 'tailViewId', 'lineColor', 'fillColor', 'fontColor']
     // If multiple types, allow 'type' field
     if (res.types.length > 1) {
         allowedFields.push('type')
@@ -714,6 +720,10 @@ function makeCreateResource(config, res) {
                 propagateNameToChildInteraction(model, body.name)
             }
 
+            if (body.stereotype !== undefined && model && typeof model._id === 'string') {
+                app.engine.setProperty(model, 'stereotype', body.stereotype)
+            }
+
             // Apply extra fields via setProperty
             if (res.createFields) {
                 res.createFields.forEach(function (f) {
@@ -777,7 +787,7 @@ function resolveFieldDef(f) {
 }
 
 function makeUpdateResource(config, res) {
-    const updateFields = res.updateFields || ['name', 'documentation']
+    const updateFields = res.updateFields || ['name', 'stereotype', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
     const fieldNames = fieldDefs.map(function (d) { return d.name })
     const checkTypes = res.modelTypes || res.types
