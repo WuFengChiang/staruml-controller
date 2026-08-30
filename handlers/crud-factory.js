@@ -63,6 +63,27 @@ function parseFieldEntry(f) {
 }
 
 /**
+ * Check fields declared with a `values` whitelist.
+ * Accepts both field-definition shapes: parseFieldEntry's { param, prop, values }
+ * and resolveFieldDef's { name, type, prop, values }.
+ *
+ * Runs before anything is created or written, so a rejected value leaves no
+ * half-configured element behind. Returns an error string, or null when clean.
+ */
+function checkFieldValues(body, defs) {
+    for (let i = 0; i < defs.length; i++) {
+        const d = defs[i]
+        if (!d.values) continue
+        const param = d.param !== undefined ? d.param : d.name
+        const given = body[param]
+        if (given !== undefined && d.values.indexOf(given) === -1) {
+            return 'Invalid ' + param + ' "' + given + '". Allowed: ' + d.values.join(', ')
+        }
+    }
+    return null
+}
+
+/**
  * Propagate name to the linked UMLInteraction when the model is a UMLAction.
  *
  * In Interaction Overview Diagrams, the view displays the UMLInteraction's name,
@@ -282,6 +303,13 @@ function createFamilyHandlers(config) {
                         pattern: prefix + '/' + res.name + '/:id/' + child.name,
                         handler: makeCreateChild(config, res, child)
                     })
+                    if (child.updateFields) {
+                        routes.push({
+                            method: 'PUT',
+                            pattern: prefix + '/' + res.name + '/:id/' + child.name + '/:childId',
+                            handler: makeUpdateChild(config, res, child)
+                        })
+                    }
                 })
             }
         })
@@ -332,6 +360,13 @@ function createFamilyHandlers(config) {
                         pattern: prefix + '/' + rel.name + '/:id/' + child.name,
                         handler: makeCreateChild(config, relAsResource, child)
                     })
+                    if (child.updateFields) {
+                        routes.push({
+                            method: 'PUT',
+                            pattern: prefix + '/' + rel.name + '/:id/' + child.name + '/:childId',
+                            handler: makeUpdateChild(config, relAsResource, child)
+                        })
+                    }
                 })
             }
         })
@@ -802,7 +837,7 @@ function makeGetResource(config, res) {
 
 function resolveFieldDef(f) {
     if (typeof f === 'string') return { name: f, type: 'string', prop: f }
-    return { name: f.name, type: f.type || 'string', prop: f.prop || f.name }
+    return { name: f.name, type: f.type || 'string', prop: f.prop || f.name, values: f.values }
 }
 
 function makeUpdateResource(config, res) {
@@ -936,16 +971,9 @@ function makeCreateChild(config, res, child) {
         ])
         if (err) return h.validationError(err, reqInfo, body)
 
-        // Enumerated createFields are checked before anything is created, so an
-        // invalid value cannot leave a half-configured element behind.
         if (child.createFields) {
-            for (let i = 0; i < child.createFields.length; i++) {
-                const def = parseFieldEntry(child.createFields[i])
-                const given = body[def.param]
-                if (def.values && given !== undefined && def.values.indexOf(given) === -1) {
-                    return h.validationError('Invalid ' + def.param + ' "' + given + '". Allowed: ' + def.values.join(', '), reqInfo, body)
-                }
-            }
+            const valErr = checkFieldValues(body, child.createFields.map(parseFieldEntry))
+            if (valErr) return h.validationError(valErr, reqInfo, body)
         }
 
         const parent = h.findById(params.id)
@@ -1059,6 +1087,66 @@ function makeCreateChild(config, res, child) {
     }
 }
 
+/**
+ * Update one child element in place.
+ *
+ * Only generated when the child config declares `updateFields`. Without this,
+ * a child created with a wrong value can only be deleted and rebuilt, and some
+ * of those values are invisible on the canvas -- a UMLEvent created without a
+ * kind silently becomes 'anyReceive', which means "any event triggers this",
+ * while the label still shows only the event name.
+ */
+function makeUpdateChild(config, res, child) {
+    const updateFields = child.updateFields || ['name', 'documentation']
+    const fieldDefs = updateFields.map(resolveFieldDef)
+    const fieldNames = fieldDefs.map(function (d) { return d.name })
+
+    return function (params, query, body, reqInfo) {
+        const checks = [h.checkUnknownFields(body, fieldNames)]
+        fieldDefs.forEach(function (d) {
+            checks.push(h.checkFieldType(body, d.name, d.type))
+        })
+        const err = h.validate(checks)
+        if (err) return h.validationError(err, reqInfo, body)
+
+        const valErr = checkFieldValues(body, fieldDefs)
+        if (valErr) return h.validationError(valErr, reqInfo, body)
+
+        if (Object.keys(body).length === 0) {
+            return h.validationError('At least one field must be provided. Allowed fields: ' + fieldNames.join(', '), reqInfo, body)
+        }
+
+        const parent = h.findById(params.id)
+        if (!parent || res.types.indexOf(parent.constructor.name) === -1) {
+            return { success: false, error: res.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
+        }
+
+        const elem = h.findById(params.childId)
+        const siblings = parent[child.field] || []
+        // The child must actually live under this parent. Without this check a
+        // valid id from somewhere else in the model would be edited instead.
+        if (!elem || siblings.indexOf(elem) === -1) {
+            return { success: false, error: child.name.replace(/-/g, ' ') + ' not found under ' + res.name.replace(/-/g, ' ') + ' ' + params.id + ': ' + params.childId, request: Object.assign({}, reqInfo, { body: body }) }
+        }
+
+        const updated = []
+        fieldDefs.forEach(function (d) {
+            if (body[d.name] !== undefined) {
+                app.engine.setProperty(elem, d.prop, body[d.name])
+                updated.push(d.name)
+            }
+        })
+
+        const serializer = child.serialize || defaultSerializeChild
+        return {
+            success: true,
+            message: 'Updated ' + child.name.replace(/-/g, ' ') + ' "' + (elem.name || params.childId) + '" (fields: ' + updated.join(', ') + ')',
+            request: Object.assign({}, reqInfo, { body: body }),
+            data: serializer(elem)
+        }
+    }
+}
+
 // ============================================================
 // Relation handlers
 // ============================================================
@@ -1119,6 +1207,11 @@ function makeCreateRelation(config, rel) {
             h.checkFieldType(body, 'name', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
+
+        if (rel.createFields) {
+            const valErr = checkFieldValues(body, rel.createFields.map(parseFieldEntry))
+            if (valErr) return h.validationError(valErr, reqInfo, body)
+        }
 
         if (!body.diagramId) {
             return h.validationError('Field "diagramId" is required', reqInfo, body)
@@ -1276,6 +1369,9 @@ function makeUpdateRelation(config, rel) {
         const err = h.validate(checks)
         if (err) return h.validationError(err, reqInfo, body)
 
+        const valErr = checkFieldValues(body, fieldDefs)
+        if (valErr) return h.validationError(valErr, reqInfo, body)
+
         if (Object.keys(body).length === 0) {
             return h.validationError('At least one field must be provided. Allowed fields: ' + allFieldNames.join(', '), reqInfo, body)
         }
@@ -1286,10 +1382,13 @@ function makeUpdateRelation(config, rel) {
         }
 
         const updated = []
-        fieldNames.forEach(function (f) {
-            if (body[f] !== undefined && f !== 'end1' && f !== 'end2') {
-                app.engine.setProperty(elem, f, body[f])
-                updated.push(f)
+        // Write to d.prop, not d.name: a field may expose a different parameter
+        // name than the model property it sets. makeUpdateResource already does
+        // this; this path used to ignore prop, which silently wrote nothing.
+        fieldDefs.forEach(function (d) {
+            if (body[d.name] !== undefined && d.name !== 'end1' && d.name !== 'end2') {
+                app.engine.setProperty(elem, d.prop, body[d.name])
+                updated.push(d.name)
             }
         })
 

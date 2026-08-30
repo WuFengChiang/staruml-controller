@@ -8,6 +8,10 @@ const VALID_PSEUDOSTATE_KINDS = [
 // duration in `expression`; the canvas label comes from `name` (e.g. 'after(10 s)').
 const VALID_EVENT_KINDS = ['signal', 'call', 'change', 'time', 'anyReceive']
 
+// UMLTransition.kind values. 'internal' is how a state reacts to an event
+// without leaving itself, which cannot be drawn as an ordinary arrow.
+const VALID_TRANSITION_KINDS = ['external', 'internal', 'local']
+
 function serializeTrigger(elem) {
     if (!elem) return null
     return {
@@ -87,8 +91,14 @@ module.exports = {
         {
             name: 'transitions',
             type: 'UMLTransition',
-            updateFields: ['name', 'documentation', 'guard'],
-            createFields: ['guard'],
+            updateFields: [
+                'name', 'documentation', 'guard',
+                { name: 'kind', type: 'string', prop: 'kind', values: VALID_TRANSITION_KINDS }
+            ],
+            createFields: [
+                'guard',
+                { param: 'kind', prop: 'kind', values: VALID_TRANSITION_KINDS }
+            ],
             serialize: serializeTransition,
             children: [
                 {
@@ -100,6 +110,12 @@ module.exports = {
                         { param: 'expression', prop: 'expression' },
                         { param: 'value', prop: 'value' }
                     ],
+                    updateFields: [
+                        'name', 'documentation',
+                        { name: 'eventKind', type: 'string', prop: 'kind', values: VALID_EVENT_KINDS },
+                        { name: 'expression', type: 'string' },
+                        { name: 'value', type: 'string' }
+                    ],
                     serialize: serializeTrigger
                 }
             ]
@@ -107,6 +123,7 @@ module.exports = {
     ],
     _constants: {
         validPseudostateKinds: VALID_PSEUDOSTATE_KINDS,
-        validEventKinds: VALID_EVENT_KINDS
+        validEventKinds: VALID_EVENT_KINDS,
+        validTransitionKinds: VALID_TRANSITION_KINDS
     }
 }
