@@ -439,8 +439,20 @@ function serializeElement(elem) {
         _type: elem.constructor.name,
         name: elem.name || ''
     }
+    if (elem.stereotype) {
+        result.stereotype = elem.stereotype
+    }
     if (elem.documentation) {
         result.documentation = elem.documentation
+    }
+    if (elem.reference !== undefined) {
+        result.referenceId = elem.reference ? elem.reference._id : null
+        if (elem.reference && elem.reference.name !== undefined) {
+            result.referenceName = elem.reference.name
+        }
+    }
+    if (elem.url !== undefined) {
+        result.url = elem.url
     }
     return result
 }
@@ -811,14 +823,14 @@ const NOTE_UPDATE_FIELDS = ['text']
 const NOTE_LINK_ALLOWED_FIELDS = ['noteId', 'targetId']
 const FREE_LINE_ALLOWED_FIELDS = ['x1', 'y1', 'x2', 'y2']
 const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height']
-const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'documentation']
+const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId']
 const EXPORT_ALLOWED_FIELDS = ['path', 'format']
 const VALID_EXPORT_FORMATS = ['png', 'jpeg', 'svg', 'pdf']
 
 // --- Shape (view-only) Constants ---
 const ALLOWED_SHAPE_TYPES = ['Text', 'TextBox', 'Rect', 'RoundRect', 'Ellipse', 'Hyperlink', 'Image', 'UMLFrame']
-const SHAPE_CREATE_FIELDS = ['type', 'text', 'url', 'imageFile', 'x1', 'y1', 'x2', 'y2']
-const SHAPE_UPDATE_FIELDS = ['text', 'url', 'imageFile']
+const SHAPE_CREATE_FIELDS = ['type', 'text', 'url', 'referenceId', 'imageFile', 'x1', 'y1', 'x2', 'y2']
+const SHAPE_UPDATE_FIELDS = ['text', 'url', 'referenceId', 'imageFile']
 const SHAPE_VIEW_TYPE_MAP = {
     'UMLTextView': 'Text',
     'UMLTextBoxView': 'TextBox',
@@ -2692,8 +2704,8 @@ const INTERACTION_ALLOWED_FIELDS = ['name', 'documentation']
 const INTERACTION_UPDATE_FIELDS = ['name', 'documentation']
 const SEQ_DIAGRAM_ALLOWED_FIELDS = ['parentId', 'name', 'width', 'height', 'documentation']
 const SEQ_DIAGRAM_UPDATE_FIELDS = ['name', 'documentation']
-const LIFELINE_ALLOWED_FIELDS = ['name', 'documentation', 'diagramId', 'x', 'y', 'height']
-const LIFELINE_UPDATE_FIELDS = ['name', 'documentation']
+const LIFELINE_ALLOWED_FIELDS = ['name', 'stereotype', 'documentation', 'diagramId', 'x', 'y', 'height']
+const LIFELINE_UPDATE_FIELDS = ['name', 'stereotype', 'documentation']
 const MESSAGE_ALLOWED_FIELDS = ['name', 'messageSort', 'source', 'target', 'diagramId', 'y', 'x', 'activationHeight', 'documentation', 'messageType']
 const VALID_MESSAGE_TYPES = ['UMLMessage', 'UMLFoundMessage', 'UMLLostMessage']
 const MESSAGE_UPDATE_FIELDS = ['name', 'messageSort', 'documentation']
@@ -3085,6 +3097,9 @@ function createLifeline(interactionId, body, reqInfo) {
             y2: (body.y !== undefined ? body.y : 50) + (body.height !== undefined ? body.height : 200),
             modelInitializer: function (m) {
                 m.name = body.name || 'Lifeline1'
+                if (body.stereotype !== undefined) {
+                    m.stereotype = body.stereotype
+                }
                 if (body.documentation !== undefined) {
                     m.documentation = body.documentation
                 }
@@ -3109,6 +3124,9 @@ function createLifeline(interactionId, body, reqInfo) {
         field: 'participants',
         modelInitializer: function (m) {
             m.name = body.name || 'Lifeline1'
+            if (body.stereotype !== undefined) {
+                m.stereotype = body.stereotype
+            }
             if (body.documentation !== undefined) {
                 m.documentation = body.documentation
             }
@@ -3144,6 +3162,7 @@ function updateLifeline(id, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, LIFELINE_UPDATE_FIELDS),
         checkFieldType(body, 'name', 'string'),
+        checkFieldType(body, 'stereotype', 'string'),
         checkFieldType(body, 'documentation', 'string')
     ])
     if (err) {
@@ -3170,6 +3189,10 @@ function updateLifeline(id, body, reqInfo) {
     if (body.name !== undefined) {
         app.engine.setProperty(lifeline, 'name', body.name)
         updated.push('name')
+    }
+    if (body.stereotype !== undefined) {
+        app.engine.setProperty(lifeline, 'stereotype', body.stereotype)
+        updated.push('stereotype')
     }
     if (body.documentation !== undefined) {
         app.engine.setProperty(lifeline, 'documentation', body.documentation)
@@ -4646,6 +4669,12 @@ function serializeShapeView(view) {
     if (view.model && view.model.url !== undefined) {
         result.url = view.model.url
     }
+    if (view.model && view.model.reference !== undefined) {
+        result.referenceId = view.model.reference ? view.model.reference._id : null
+        if (view.model.reference && view.model.reference.name !== undefined) {
+            result.referenceName = view.model.reference.name
+        }
+    }
     if (view.model && view.model.imageFile !== undefined) {
         result.imageFile = view.model.imageFile
     }
@@ -4674,6 +4703,7 @@ function createShape(diagramId, body, reqInfo) {
         checkFieldType(body, 'type', 'string'),
         checkFieldType(body, 'text', 'string'),
         checkFieldType(body, 'url', 'string'),
+        checkFieldType(body, 'referenceId', 'string|null'),
         checkFieldType(body, 'imageFile', 'string'),
         checkFieldType(body, 'x1', 'number'),
         checkFieldType(body, 'y1', 'number'),
@@ -4692,26 +4722,53 @@ function createShape(diagramId, body, reqInfo) {
         return validationError('Invalid shape type "' + body.type + '". Allowed: ' + ALLOWED_SHAPE_TYPES.join(', '), reqInfo, body)
     }
 
+    if (body.referenceId !== undefined && body.type !== 'Hyperlink') {
+        return validationError('Field "referenceId" is only supported for type "Hyperlink"', reqInfo, body)
+    }
+
     const diagram = findById(diagramId)
     if (!diagram || !diagram.ownedViews) {
         return { success: false, error: 'Diagram not found: ' + diagramId, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
     try {
-        const view = app.factory.createModelAndView({
+        const createOptions = {
             id: body.type,
             diagram: diagram,
             x1: body.x1 !== undefined ? body.x1 : 100,
             y1: body.y1 !== undefined ? body.y1 : 100,
             x2: body.x2 !== undefined ? body.x2 : 200,
             y2: body.y2 !== undefined ? body.y2 : 150
-        })
+        }
+        // Hyperlink creates a model element and requires a parent Model (the diagram owner)
+        if (body.type === 'Hyperlink') {
+            createOptions.parent = diagram._parent
+        }
+        const view = app.factory.createModelAndView(createOptions)
 
         if (body.text !== undefined) {
-            app.engine.setProperty(view, 'text', body.text)
+            if (body.type === 'Hyperlink') {
+                // HyperlinkView has no text property; label is derived from model.url
+                if (body.url === undefined) {
+                    app.engine.setProperty(view.model, 'url', body.text)
+                }
+            } else {
+                app.engine.setProperty(view, 'text', body.text)
+            }
         }
         if (body.url !== undefined && view.model) {
             app.engine.setProperty(view.model, 'url', body.url)
+        }
+        if (body.referenceId !== undefined && view.model) {
+            if (body.referenceId === null) {
+                app.engine.setProperty(view.model, 'reference', null)
+            } else {
+                const refTarget = findById(body.referenceId)
+                if (!refTarget) {
+                    return { success: false, error: 'referenceId not found: ' + body.referenceId, request: Object.assign({}, reqInfo, { body: body }) }
+                }
+                app.engine.setProperty(view.model, 'reference', refTarget)
+            }
         }
         if (body.imageFile !== undefined && view.model) {
             app.engine.setProperty(view.model, 'imageFile', body.imageFile)
@@ -4753,6 +4810,7 @@ function updateShape(id, body, reqInfo) {
         checkUnknownFields(body, SHAPE_UPDATE_FIELDS),
         checkFieldType(body, 'text', 'string'),
         checkFieldType(body, 'url', 'string'),
+        checkFieldType(body, 'referenceId', 'string|null'),
         checkFieldType(body, 'imageFile', 'string')
     ])
     if (err) {
@@ -4768,6 +4826,10 @@ function updateShape(id, body, reqInfo) {
         return { success: false, error: 'Shape not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
+    if (body.referenceId !== undefined && view.constructor.name !== 'HyperlinkView') {
+        return validationError('Field "referenceId" is only supported for Hyperlink shapes', reqInfo, body)
+    }
+
     const updated = []
     if (body.text !== undefined) {
         app.engine.setProperty(view, 'text', body.text)
@@ -4776,6 +4838,18 @@ function updateShape(id, body, reqInfo) {
     if (body.url !== undefined && view.model) {
         app.engine.setProperty(view.model, 'url', body.url)
         updated.push('url')
+    }
+    if (body.referenceId !== undefined && view.model) {
+        if (body.referenceId === null) {
+            app.engine.setProperty(view.model, 'reference', null)
+        } else {
+            const refTarget = findById(body.referenceId)
+            if (!refTarget) {
+                return { success: false, error: 'referenceId not found: ' + body.referenceId, request: Object.assign({}, reqInfo, { body: body }) }
+            }
+            app.engine.setProperty(view.model, 'reference', refTarget)
+        }
+        updated.push('reference')
     }
     if (body.imageFile !== undefined && view.model) {
         app.engine.setProperty(view.model, 'imageFile', body.imageFile)
@@ -4887,7 +4961,9 @@ function updateGenericElement(id, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, GENERIC_ELEMENT_UPDATE_FIELDS),
         checkFieldType(body, 'name', 'string'),
-        checkFieldType(body, 'documentation', 'string')
+        checkFieldType(body, 'stereotype', 'string'),
+        checkFieldType(body, 'documentation', 'string'),
+        checkFieldType(body, 'referenceId', 'string|null')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -4909,14 +4985,34 @@ function updateGenericElement(id, body, reqInfo) {
         return { success: false, error: 'Element not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
+    if (body.referenceId !== undefined && !(elem instanceof type.Hyperlink)) {
+        return validationError('Field "referenceId" is only supported for Hyperlink elements', reqInfo, body)
+    }
+
     const updated = []
     if (body.name !== undefined) {
         app.engine.setProperty(elem, 'name', body.name)
         updated.push('name')
     }
+    if (body.stereotype !== undefined) {
+        app.engine.setProperty(elem, 'stereotype', body.stereotype)
+        updated.push('stereotype')
+    }
     if (body.documentation !== undefined) {
         app.engine.setProperty(elem, 'documentation', body.documentation)
         updated.push('documentation')
+    }
+    if (body.referenceId !== undefined) {
+        if (body.referenceId === null) {
+            app.engine.setProperty(elem, 'reference', null)
+        } else {
+            const refTarget = findById(body.referenceId)
+            if (!refTarget) {
+                return { success: false, error: 'referenceId not found: ' + body.referenceId, request: Object.assign({}, reqInfo, { body: body }) }
+            }
+            app.engine.setProperty(elem, 'reference', refTarget)
+        }
+        updated.push('reference')
     }
 
     return {
