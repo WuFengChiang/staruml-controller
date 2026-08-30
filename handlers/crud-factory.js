@@ -59,7 +59,7 @@ function isAutoContainer(elem) {
  */
 function parseFieldEntry(f) {
     if (typeof f === 'string') return { param: f, prop: f }
-    return { param: f.param, prop: f.prop || f.param }
+    return { param: f.param, prop: f.prop || f.param, values: f.values }
 }
 
 /**
@@ -309,6 +309,25 @@ function createFamilyHandlers(config) {
                 pattern: prefix + '/' + rel.name + '/:id',
                 handler: makeDeleteRelation(config, rel)
             })
+
+            // Child routes on relations (e.g., triggers under a transition).
+            // makeListChildren/makeCreateChild only read `name` and `types` off the
+            // parent config, so a resource-shaped view of the relation reuses them as-is.
+            if (rel.children) {
+                const relAsResource = { name: rel.name, types: [rel.modelType || rel.type] }
+                rel.children.forEach(function (child) {
+                    routes.push({
+                        method: 'GET',
+                        pattern: prefix + '/' + rel.name + '/:id/' + child.name,
+                        handler: makeListChildren(config, relAsResource, child)
+                    })
+                    routes.push({
+                        method: 'POST',
+                        pattern: prefix + '/' + rel.name + '/:id/' + child.name,
+                        handler: makeCreateChild(config, relAsResource, child)
+                    })
+                })
+            }
         })
     }
 
@@ -906,6 +925,18 @@ function makeCreateChild(config, res, child) {
             h.checkFieldType(body, 'diagramId', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
+
+        // Enumerated createFields are checked before anything is created, so an
+        // invalid value cannot leave a half-configured element behind.
+        if (child.createFields) {
+            for (let i = 0; i < child.createFields.length; i++) {
+                const def = parseFieldEntry(child.createFields[i])
+                const given = body[def.param]
+                if (def.values && given !== undefined && def.values.indexOf(given) === -1) {
+                    return h.validationError('Invalid ' + def.param + ' "' + given + '". Allowed: ' + def.values.join(', '), reqInfo, body)
+                }
+            }
+        }
 
         const parent = h.findById(params.id)
         if (!parent) {

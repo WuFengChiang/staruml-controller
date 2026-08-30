@@ -245,6 +245,8 @@ const ALLOWED_CHILD_TYPES = [
     'UMLInteractionOperand',
     'SysMLProperty', 'SysMLOperation', 'SysMLFlowProperty',
     'UMLInputPin', 'UMLOutputPin',
+    // Trigger events on transitions (UMLTransition.triggers) and actions (UMLAction.triggers)
+    'UMLEvent',
     // BPMN Event Definitions
     'BPMNCompensateEventDefinition', 'BPMNCancelEventDefinition',
     'BPMNErrorEventDefinition', 'BPMNLinkEventDefinition',
@@ -271,6 +273,7 @@ const CHILD_TYPE_DEFAULT_FIELDS = {
     'SysMLFlowProperty': 'flowProperties',
     'UMLInputPin': 'inputs',
     'UMLOutputPin': 'outputs',
+    'UMLEvent': 'triggers',
     'BPMNCompensateEventDefinition': 'eventDefinitions',
     'BPMNCancelEventDefinition': 'eventDefinitions',
     'BPMNErrorEventDefinition': 'eventDefinitions',
