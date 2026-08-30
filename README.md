@@ -107,7 +107,8 @@ Select **Tools > StarUML Controller > Stop Server** from the menu bar.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/status` | GET | Health check and endpoint list |
+| `/api/status` | GET | Health check. Small payload: status, version, and the open project |
+| `/api/status/capabilities` | GET | Allowed type lists and the full endpoint list (~46 KB) |
 | `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element |
 | `/api/elements/:id/tags` | GET / POST | List or create tags |
 | `/api/tags/:id` | GET / PUT / DELETE | Get, update, or delete tag |
