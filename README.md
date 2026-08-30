@@ -301,6 +301,15 @@ Each diagram family below provides dedicated CRUD endpoints with type-specific v
 | `/api/statemachine/final-states/:id` | GET / PUT / DELETE | Get, update, or delete final state |
 | `/api/statemachine/transitions` | GET / POST | List or create transitions |
 | `/api/statemachine/transitions/:id` | GET / PUT / DELETE | Get, update, or delete transition |
+| `/api/statemachine/transitions/:id/triggers` | GET / POST | List or create trigger events on a transition |
+| `/api/statemachine/transitions/:id/triggers/:childId` | PUT | Update a trigger event |
+
+A transition with no trigger is a **completion transition**: it fires as soon as the
+source state's activity finishes. Write the event notation into the trigger's `name`
+(`after(10 s)`, `at(12:00)`, or the signal name) and leave the transition's own `name`
+empty — StarUML builds the edge label from the triggers, the guard and the effects.
+Set `eventKind` too: omitting it leaves the event as `anyReceive`, meaning "any event
+triggers this", which looks identical on the canvas.
 
 #### Component Diagram (`/api/component/`)
 
