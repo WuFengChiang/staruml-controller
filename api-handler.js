@@ -7,7 +7,11 @@
 
 const ddlGenerator = require('./ddl-generator')
 const crudFactory = require('./handlers/crud-factory')
-const { autoExpandFrame, fitFrameToViews, clearEdgeWaypoints } = require('./handlers/shared-helpers')
+const {
+    autoExpandFrame, fitFrameToViews, clearEdgeWaypoints,
+    createWriteReport, applyProperty, reportIgnoredWrite,
+    writeReportMessage, appendWriteWarnings, attachWriteReport, writeValuesEqual
+} = require('./handlers/shared-helpers')
 
 // ============================================================
 // Family Configs & Routers
@@ -938,18 +942,17 @@ function updateDiagram(id, body, reqInfo) {
         return { success: false, error: 'Diagram not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(diagram, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, diagram, 'name', body.name)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated diagram "' + diagram.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeDiagram(diagram)
-    }
+    }, report)
 }
 
 function deleteDiagram(id, reqInfo) {
@@ -1054,18 +1057,17 @@ function updateDataModel(id, body, reqInfo) {
         return { success: false, error: 'Data model not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(dm, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, dm, 'name', body.name)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated data model "' + dm.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated data model "' + dm.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeElement(dm)
-    }
+    }, report)
 }
 
 function deleteDataModel(id, reqInfo) {
@@ -1269,22 +1271,20 @@ function updateEntity(id, body, reqInfo) {
         return { success: false, error: 'Entity not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(entity, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, entity, 'name', body.name)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(entity, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, entity, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated entity "' + entity.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated entity "' + entity.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeEntity(entity)
-    }
+    }, report)
 }
 
 function deleteEntity(id, reqInfo) {
@@ -1481,36 +1481,38 @@ function updateColumn(id, body, reqInfo) {
         }
     }
 
-    const updated = []
+    const report = createWriteReport()
     const simpleProps = ['name', 'length', 'primaryKey', 'foreignKey', 'nullable', 'unique', 'documentation']
     simpleProps.forEach(function (prop) {
         if (body[prop] !== undefined) {
-            app.engine.setProperty(col, prop, body[prop])
-            updated.push(prop)
+            applyProperty(report, col, prop, body[prop])
         }
     })
     if (body.type !== undefined) {
-        app.engine.setProperty(col, 'type', body.type.toUpperCase())
-        updated.push('type')
+        applyProperty(report, col, 'type', body.type.toUpperCase(), 'type')
     }
     if (body.referenceToId !== undefined) {
         if (body.referenceToId === null) {
-            app.engine.setProperty(col, 'referenceTo', null)
+            applyProperty(report, col, 'referenceTo', null, 'referenceTo')
         } else {
             const ref = findById(body.referenceToId)
             if (ref) {
-                app.engine.setProperty(col, 'referenceTo', ref)
+                applyProperty(report, col, 'referenceTo', ref, 'referenceTo')
+            } else {
+                // Used to report referenceTo as updated even though nothing was set.
+                reportIgnoredWrite(report, 'referenceTo', body.referenceToId,
+                    col.referenceTo ? col.referenceTo._id : null,
+                    'referenceToId does not match any element')
             }
         }
-        updated.push('referenceTo')
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated column "' + col.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated column "' + col.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeColumn(col)
-    }
+    }, report)
 }
 
 function deleteColumn(id, reqInfo) {
@@ -1645,26 +1647,23 @@ function updateTag(id, body, reqInfo) {
         return { success: false, error: 'Tag not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(tag, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, tag, 'name', body.name)
     }
     if (body.kind !== undefined) {
-        app.engine.setProperty(tag, 'kind', body.kind)
-        updated.push('kind')
+        applyProperty(report, tag, 'kind', body.kind)
     }
     if (body.value !== undefined) {
-        app.engine.setProperty(tag, 'value', body.value)
-        updated.push('value')
+        applyProperty(report, tag, 'value', body.value)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated tag "' + tag.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated tag "' + tag.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeTag(tag)
-    }
+    }, report)
 }
 
 function deleteTag(id, reqInfo) {
@@ -1780,6 +1779,7 @@ function updateSequence(id, body, reqInfo) {
         return { success: false, error: 'Sequence not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
+    const report = createWriteReport()
     if (body.name !== undefined) {
         // Check for duplicate on same entity
         const parent = tag._parent
@@ -1794,16 +1794,16 @@ function updateSequence(id, body, reqInfo) {
 
         const newTagName = SEQUENCE_PREFIX + body.name
         const newTagValue = 'CREATE SEQUENCE ' + body.name
-        app.engine.setProperty(tag, 'name', newTagName)
-        app.engine.setProperty(tag, 'value', newTagValue)
+        applyProperty(report, tag, 'name', newTagName, 'name')
+        applyProperty(report, tag, 'value', newTagValue, 'value')
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated sequence "' + sequenceNameFromTag(tag) + '"',
+        message: writeReportMessage('Updated sequence "' + sequenceNameFromTag(tag) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeSequence(tag)
-    }
+    }, report)
 }
 
 function deleteSequence(id, reqInfo) {
@@ -1925,7 +1925,7 @@ function updateIndex(id, body, reqInfo) {
         return { success: false, error: 'Index not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
 
     if (body.name !== undefined) {
         // Check for duplicate on same entity
@@ -1938,21 +1938,19 @@ function updateIndex(id, body, reqInfo) {
                 }
             }
         }
-        app.engine.setProperty(tag, 'name', INDEX_PREFIX + body.name)
-        updated.push('name')
+        applyProperty(report, tag, 'name', INDEX_PREFIX + body.name)
     }
 
     if (body.definition !== undefined) {
-        app.engine.setProperty(tag, 'value', body.definition)
-        updated.push('definition')
+        applyProperty(report, tag, 'value', body.definition, 'definition')
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated index "' + indexNameFromTag(tag) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated index "' + indexNameFromTag(tag) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeIndex(tag)
-    }
+    }, report)
 }
 
 function deleteIndex(id, reqInfo) {
@@ -2117,31 +2115,37 @@ function createRelationship(body, reqInfo) {
     }
     const rel = view.model
 
+    const report = createWriteReport()
+
     // Set end1 properties
     if (rel.end1) {
-        app.engine.setProperty(rel.end1, 'reference', entity1)
-        app.engine.setProperty(rel.end1, 'cardinality', body.end1.cardinality || '1')
+        applyProperty(report, rel.end1, 'reference', entity1, 'end1.reference')
+        applyProperty(report, rel.end1, 'cardinality', body.end1.cardinality || '1', 'end1.cardinality')
         if (body.end1.name !== undefined) {
-            app.engine.setProperty(rel.end1, 'name', body.end1.name)
+            applyProperty(report, rel.end1, 'name', body.end1.name, 'end1.name')
         }
+    } else {
+        reportIgnoredWrite(report, 'end1', JSON.stringify(body.end1), undefined, 'the created relationship has no end1')
     }
 
     // Set end2 properties
     if (rel.end2) {
-        app.engine.setProperty(rel.end2, 'reference', entity2)
-        app.engine.setProperty(rel.end2, 'cardinality', body.end2.cardinality || '0..*')
+        applyProperty(report, rel.end2, 'reference', entity2, 'end2.reference')
+        applyProperty(report, rel.end2, 'cardinality', body.end2.cardinality || '0..*', 'end2.cardinality')
         if (body.end2.name !== undefined) {
-            app.engine.setProperty(rel.end2, 'name', body.end2.name)
+            applyProperty(report, rel.end2, 'name', body.end2.name, 'end2.name')
         }
+    } else {
+        reportIgnoredWrite(report, 'end2', JSON.stringify(body.end2), undefined, 'the created relationship has no end2')
     }
 
     autoExpandFrame(diagram)
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Created relationship "' + (rel.name || rel._id) + '" with view on diagram "' + diagram.name + '"',
+        message: appendWriteWarnings('Created relationship "' + (rel.name || rel._id) + '" with view on diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeRelationship(rel)
-    }
+    }, report)
 }
 
 function getRelationship(id, reqInfo) {
@@ -2224,52 +2228,44 @@ function updateRelationship(id, body, reqInfo) {
         return { success: false, error: 'Relationship not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(rel, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, rel, 'name', body.name)
     }
     if (body.identifying !== undefined) {
-        app.engine.setProperty(rel, 'identifying', body.identifying)
-        updated.push('identifying')
+        applyProperty(report, rel, 'identifying', body.identifying)
     }
     if (body.end1 && rel.end1) {
         if (body.end1.name !== undefined) {
-            app.engine.setProperty(rel.end1, 'name', body.end1.name)
-            updated.push('end1.name')
+            applyProperty(report, rel.end1, 'name', body.end1.name, 'end1.name')
         }
         if (body.end1.cardinality !== undefined) {
-            app.engine.setProperty(rel.end1, 'cardinality', body.end1.cardinality)
-            updated.push('end1.cardinality')
+            applyProperty(report, rel.end1, 'cardinality', body.end1.cardinality, 'end1.cardinality')
         }
         if (body.end1.reference !== undefined) {
             const entity1 = findById(body.end1.reference)
-            app.engine.setProperty(rel.end1, 'reference', entity1)
-            updated.push('end1.reference')
+            applyProperty(report, rel.end1, 'reference', entity1, 'end1.reference')
         }
     }
     if (body.end2 && rel.end2) {
         if (body.end2.name !== undefined) {
-            app.engine.setProperty(rel.end2, 'name', body.end2.name)
-            updated.push('end2.name')
+            applyProperty(report, rel.end2, 'name', body.end2.name, 'end2.name')
         }
         if (body.end2.cardinality !== undefined) {
-            app.engine.setProperty(rel.end2, 'cardinality', body.end2.cardinality)
-            updated.push('end2.cardinality')
+            applyProperty(report, rel.end2, 'cardinality', body.end2.cardinality, 'end2.cardinality')
         }
         if (body.end2.reference !== undefined) {
             const entity2 = findById(body.end2.reference)
-            app.engine.setProperty(rel.end2, 'reference', entity2)
-            updated.push('end2.reference')
+            applyProperty(report, rel.end2, 'reference', entity2, 'end2.reference')
         }
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated relationship "' + (rel.name || rel._id) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated relationship "' + (rel.name || rel._id) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeRelationship(rel)
-    }
+    }, report)
 }
 
 function deleteRelationship(id, reqInfo) {
@@ -2829,22 +2825,20 @@ function updateInteraction(id, body, reqInfo) {
         return { success: false, error: 'Interaction not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(interaction, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, interaction, 'name', body.name)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(interaction, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, interaction, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated interaction "' + interaction.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated interaction "' + interaction.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeInteraction(interaction)
-    }
+    }, report)
 }
 
 function deleteInteraction(id, reqInfo) {
@@ -2962,26 +2956,35 @@ function createSeqDiagram(body, reqInfo) {
     })
 
     // Resize frame if width/height specified
+    const report = createWriteReport()
     if (body.width !== undefined || body.height !== undefined) {
         const frameView = (diagram.ownedViews || []).filter(function (v) {
             return v.constructor && v.constructor.name === 'UMLFrameView'
         })[0]
         if (frameView) {
             if (body.width !== undefined) {
-                app.engine.setProperty(frameView, 'width', body.width)
+                applyProperty(report, frameView, 'width', body.width)
             }
             if (body.height !== undefined) {
-                app.engine.setProperty(frameView, 'height', body.height)
+                applyProperty(report, frameView, 'height', body.height)
+            }
+        } else {
+            // The size used to be dropped without a word on a diagram with no frame.
+            if (body.width !== undefined) {
+                reportIgnoredWrite(report, 'width', body.width, undefined, 'this diagram has no UMLFrameView to resize')
+            }
+            if (body.height !== undefined) {
+                reportIgnoredWrite(report, 'height', body.height, undefined, 'this diagram has no UMLFrameView to resize')
             }
         }
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Created sequence diagram "' + diagram.name + '"',
+        message: appendWriteWarnings('Created sequence diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeSeqDiagram(diagram)
-    }
+    }, report)
 }
 
 function updateSeqDiagram(id, body, reqInfo) {
@@ -3010,22 +3013,20 @@ function updateSeqDiagram(id, body, reqInfo) {
         return { success: false, error: 'Sequence diagram not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(diagram, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, diagram, 'name', body.name)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(diagram, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, diagram, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated sequence diagram "' + diagram.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated sequence diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeSeqDiagram(diagram)
-    }
+    }, report)
 }
 
 function deleteSeqDiagram(id, reqInfo) {
@@ -3188,26 +3189,23 @@ function updateLifeline(id, body, reqInfo) {
         return { success: false, error: 'Lifeline not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(lifeline, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, lifeline, 'name', body.name)
     }
     if (body.stereotype !== undefined) {
-        app.engine.setProperty(lifeline, 'stereotype', body.stereotype)
-        updated.push('stereotype')
+        applyProperty(report, lifeline, 'stereotype', body.stereotype)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(lifeline, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, lifeline, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated lifeline "' + lifeline.name + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated lifeline "' + lifeline.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeLifeline(lifeline)
-    }
+    }, report)
 }
 
 function deleteLifeline(id, reqInfo) {
@@ -3650,26 +3648,23 @@ function updateCombinedFragment(id, body, reqInfo) {
         return { success: false, error: 'Combined fragment not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(fragment, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, fragment, 'name', body.name)
     }
     if (body.interactionOperator !== undefined) {
-        app.engine.setProperty(fragment, 'interactionOperator', body.interactionOperator)
-        updated.push('interactionOperator')
+        applyProperty(report, fragment, 'interactionOperator', body.interactionOperator)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(fragment, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, fragment, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated combined fragment "' + (fragment.name || fragment.interactionOperator) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated combined fragment "' + (fragment.name || fragment.interactionOperator) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeCombinedFragment(fragment)
-    }
+    }, report)
 }
 
 function deleteCombinedFragment(id, reqInfo) {
@@ -3776,26 +3771,23 @@ function updateOperand(id, body, reqInfo) {
         return { success: false, error: 'Operand not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(operand, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, operand, 'name', body.name)
     }
     if (body.guard !== undefined) {
-        app.engine.setProperty(operand, 'guard', body.guard)
-        updated.push('guard')
+        applyProperty(report, operand, 'guard', body.guard)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(operand, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, operand, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated operand "' + (operand.name || operand.guard || operand._id) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated operand "' + (operand.name || operand.guard || operand._id) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeInteractionOperand(operand)
-    }
+    }, report)
 }
 
 function deleteOperand(id, reqInfo) {
@@ -3990,31 +3982,27 @@ function updateStateInvariant(id, body, reqInfo) {
         }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(si, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, si, 'name', body.name)
     }
     if (body.covered !== undefined) {
         const coveredRef = findById(body.covered)
-        app.engine.setProperty(si, 'covered', coveredRef)
-        updated.push('covered')
+        applyProperty(report, si, 'covered', coveredRef)
     }
     if (body.invariant !== undefined) {
-        app.engine.setProperty(si, 'invariant', body.invariant)
-        updated.push('invariant')
+        applyProperty(report, si, 'invariant', body.invariant)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(si, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, si, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated state invariant "' + (si.name || si._id) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated state invariant "' + (si.name || si._id) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeStateInvariant(si)
-    }
+    }, report)
 }
 
 function deleteStateInvariant(id, reqInfo) {
@@ -4206,35 +4194,30 @@ function updateInteractionUse(id, body, reqInfo) {
         }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(iu, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, iu, 'name', body.name)
     }
     if (body.refersTo !== undefined) {
         const refTarget = findById(body.refersTo)
-        app.engine.setProperty(iu, 'refersTo', refTarget)
-        updated.push('refersTo')
+        applyProperty(report, iu, 'refersTo', refTarget)
     }
     if (body.arguments !== undefined) {
-        app.engine.setProperty(iu, 'arguments', body.arguments)
-        updated.push('arguments')
+        applyProperty(report, iu, 'arguments', body.arguments)
     }
     if (body.returnValue !== undefined) {
-        app.engine.setProperty(iu, 'returnValue', body.returnValue)
-        updated.push('returnValue')
+        applyProperty(report, iu, 'returnValue', body.returnValue)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(iu, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, iu, 'documentation', body.documentation)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated interaction use "' + (iu.name || iu._id) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated interaction use "' + (iu.name || iu._id) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeInteractionUse(iu)
-    }
+    }, report)
 }
 
 function deleteInteractionUse(id, reqInfo) {
@@ -4402,19 +4385,20 @@ function createNote(diagramId, body, reqInfo) {
             return { success: false, error: 'Failed to create note. StarUML factory returned null.', request: Object.assign({}, reqInfo, { body: body }) }
         }
 
+        const report = createWriteReport()
         if (body.text !== undefined) {
-            app.engine.setProperty(view, 'text', body.text)
+            applyProperty(report, view, 'text', body.text)
         }
 
         // Auto-expand frame to contain newly created note
         autoExpandFrame(diagram)
 
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created note on diagram "' + (diagram.name || diagramId) + '"',
+            message: appendWriteWarnings('Created note on diagram "' + (diagram.name || diagramId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializeNoteView(view)
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,
@@ -4455,18 +4439,17 @@ function updateNote(id, body, reqInfo) {
         return { success: false, error: 'Note not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.text !== undefined) {
-        app.engine.setProperty(view, 'text', body.text)
-        updated.push('text')
+        applyProperty(report, view, 'text', body.text)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated note (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated note', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeNoteView(view)
-    }
+    }, report)
 }
 
 function deleteNote(id, reqInfo) {
@@ -4749,43 +4732,56 @@ function createShape(diagramId, body, reqInfo) {
         }
         const view = app.factory.createModelAndView(createOptions)
 
+        const report = createWriteReport()
         if (body.text !== undefined) {
             if (body.type === 'Hyperlink') {
                 // HyperlinkView has no text property; label is derived from model.url
                 if (body.url === undefined) {
-                    app.engine.setProperty(view.model, 'url', body.text)
+                    applyProperty(report, view.model, 'url', body.text, 'text')
+                } else {
+                    reportIgnoredWrite(report, 'text', body.text, body.url,
+                        'a Hyperlink shows its url; url was given, so text is unused')
                 }
             } else {
-                app.engine.setProperty(view, 'text', body.text)
+                applyProperty(report, view, 'text', body.text)
             }
         }
+        // url, referenceId and imageFile need a model element behind the view.
+        if (!view.model) {
+            ['url', 'referenceId', 'imageFile'].forEach(function (f) {
+                if (body[f] !== undefined) {
+                    reportIgnoredWrite(report, f, body[f], undefined,
+                        'shape type "' + body.type + '" creates a view with no model element')
+                }
+            })
+        }
         if (body.url !== undefined && view.model) {
-            app.engine.setProperty(view.model, 'url', body.url)
+            applyProperty(report, view.model, 'url', body.url)
         }
         if (body.referenceId !== undefined && view.model) {
             if (body.referenceId === null) {
-                app.engine.setProperty(view.model, 'reference', null)
+                applyProperty(report, view.model, 'reference', null, 'reference')
             } else {
                 const refTarget = findById(body.referenceId)
                 if (!refTarget) {
                     return { success: false, error: 'referenceId not found: ' + body.referenceId, request: Object.assign({}, reqInfo, { body: body }) }
                 }
-                app.engine.setProperty(view.model, 'reference', refTarget)
+                applyProperty(report, view.model, 'reference', refTarget, 'reference')
             }
         }
         if (body.imageFile !== undefined && view.model) {
-            app.engine.setProperty(view.model, 'imageFile', body.imageFile)
+            applyProperty(report, view.model, 'imageFile', body.imageFile)
         }
 
         // Auto-expand frame to contain newly created shape
         autoExpandFrame(diagram)
 
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created shape "' + body.type + '" on diagram "' + (diagram.name || diagramId) + '"',
+            message: appendWriteWarnings('Created shape "' + body.type + '" on diagram "' + (diagram.name || diagramId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializeShapeView(view)
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,
@@ -4833,38 +4829,44 @@ function updateShape(id, body, reqInfo) {
         return validationError('Field "referenceId" is only supported for Hyperlink shapes', reqInfo, body)
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.text !== undefined) {
-        app.engine.setProperty(view, 'text', body.text)
-        updated.push('text')
+        applyProperty(report, view, 'text', body.text)
+    }
+    // url, reference and imageFile live on the shape's model. A view without a
+    // model used to drop them without a word.
+    const modelOnlyFields = ['url', 'referenceId', 'imageFile']
+    if (!view.model) {
+        modelOnlyFields.forEach(function (f) {
+            if (body[f] !== undefined) {
+                reportIgnoredWrite(report, f, body[f], null, 'this shape view has no model to store it on')
+            }
+        })
     }
     if (body.url !== undefined && view.model) {
-        app.engine.setProperty(view.model, 'url', body.url)
-        updated.push('url')
+        applyProperty(report, view.model, 'url', body.url)
     }
     if (body.referenceId !== undefined && view.model) {
         if (body.referenceId === null) {
-            app.engine.setProperty(view.model, 'reference', null)
+            applyProperty(report, view.model, 'reference', null, 'reference')
         } else {
             const refTarget = findById(body.referenceId)
             if (!refTarget) {
                 return { success: false, error: 'referenceId not found: ' + body.referenceId, request: Object.assign({}, reqInfo, { body: body }) }
             }
-            app.engine.setProperty(view.model, 'reference', refTarget)
+            applyProperty(report, view.model, 'reference', refTarget, 'reference')
         }
-        updated.push('reference')
     }
     if (body.imageFile !== undefined && view.model) {
-        app.engine.setProperty(view.model, 'imageFile', body.imageFile)
-        updated.push('imageFile')
+        applyProperty(report, view.model, 'imageFile', body.imageFile)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated shape (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated shape', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeShapeView(view)
-    }
+    }, report)
 }
 
 function deleteShape(id, reqInfo) {
@@ -4992,38 +4994,34 @@ function updateGenericElement(id, body, reqInfo) {
         return validationError('Field "referenceId" is only supported for Hyperlink elements', reqInfo, body)
     }
 
-    const updated = []
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(elem, 'name', body.name)
-        updated.push('name')
+        applyProperty(report, elem, 'name', body.name)
     }
     if (body.stereotype !== undefined) {
-        app.engine.setProperty(elem, 'stereotype', body.stereotype)
-        updated.push('stereotype')
+        applyProperty(report, elem, 'stereotype', body.stereotype)
     }
     if (body.documentation !== undefined) {
-        app.engine.setProperty(elem, 'documentation', body.documentation)
-        updated.push('documentation')
+        applyProperty(report, elem, 'documentation', body.documentation)
     }
     if (body.referenceId !== undefined) {
         if (body.referenceId === null) {
-            app.engine.setProperty(elem, 'reference', null)
+            applyProperty(report, elem, 'reference', null, 'reference')
         } else {
             const refTarget = findById(body.referenceId)
             if (!refTarget) {
                 return { success: false, error: 'referenceId not found: ' + body.referenceId, request: Object.assign({}, reqInfo, { body: body }) }
             }
-            app.engine.setProperty(elem, 'reference', refTarget)
+            applyProperty(report, elem, 'reference', refTarget, 'reference')
         }
-        updated.push('reference')
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated element "' + (elem.name || id) + '" (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated element "' + (elem.name || id) + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeElement(elem)
-    }
+    }, report)
 }
 
 function deleteGenericElement(id, reqInfo) {
@@ -5319,16 +5317,17 @@ function updateGenericDiagram(id, body, reqInfo) {
         return { success: false, error: 'Diagram not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
+    const report = createWriteReport()
     if (body.name !== undefined) {
-        app.engine.setProperty(diagram, 'name', body.name)
+        applyProperty(report, diagram, 'name', body.name)
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated diagram "' + diagram.name + '"',
+        message: writeReportMessage('Updated diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeGenericDiagramDetail(diagram)
-    }
+    }, report)
 }
 
 // Auto-created container types that should be cleaned up when empty
@@ -5562,12 +5561,26 @@ function createDiagramElement(diagramId, body, reqInfo) {
 
         const model = view.model || view
 
-        if (body.name && model && typeof model._id === 'string') {
-            app.engine.setProperty(model, 'name', body.name)
+        const report = createWriteReport()
+        const hasModel = model && typeof model._id === 'string'
+
+        if (body.name) {
+            if (hasModel) {
+                applyProperty(report, model, 'name', body.name)
+            } else {
+                reportIgnoredWrite(report, 'name', body.name, undefined,
+                    'type "' + body.type + '" creates a view with no model element to name')
+            }
         }
 
-        if (body.pseudostateKind && model && model.constructor.name === 'UMLPseudostate') {
-            app.engine.setProperty(model, 'kind', body.pseudostateKind)
+        if (body.pseudostateKind) {
+            if (model && model.constructor.name === 'UMLPseudostate') {
+                applyProperty(report, model, 'kind', body.pseudostateKind, 'pseudostateKind')
+            } else {
+                // Used to be dropped without a word when the created type was not a pseudostate.
+                reportIgnoredWrite(report, 'pseudostateKind', body.pseudostateKind, undefined,
+                    'only a UMLPseudostate has a kind; this created a ' + (model ? model.constructor.name : view.constructor.name))
+            }
         }
 
         const data = {
@@ -5595,12 +5608,12 @@ function createDiagramElement(diagramId, body, reqInfo) {
         // Auto-expand frame to contain newly created element
         autoExpandFrame(diagram)
 
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created element "' + (model ? model.name || body.type : body.type) + '" on diagram "' + (diagram.name || diagramId) + '"',
+            message: appendWriteWarnings('Created element "' + (model ? model.name || body.type : body.type) + '" on diagram "' + (diagram.name || diagramId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: data
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,
@@ -5675,8 +5688,14 @@ function createDiagramRelation(diagramId, body, reqInfo) {
 
         const model = view.model || view
 
-        if (body.name && model && typeof model._id === 'string') {
-            app.engine.setProperty(model, 'name', body.name)
+        const report = createWriteReport()
+        if (body.name) {
+            if (model && typeof model._id === 'string') {
+                applyProperty(report, model, 'name', body.name)
+            } else {
+                reportIgnoredWrite(report, 'name', body.name, undefined,
+                    'type "' + body.type + '" creates a view with no model element to name')
+            }
         }
 
         const data = {
@@ -5692,12 +5711,12 @@ function createDiagramRelation(diagramId, body, reqInfo) {
         // Auto-expand frame to contain newly created relation
         autoExpandFrame(diagram)
 
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created relation "' + (model ? model.name || body.type : body.type) + '" on diagram "' + (diagram.name || diagramId) + '"',
+            message: appendWriteWarnings('Created relation "' + (model ? model.name || body.type : body.type) + '" on diagram "' + (diagram.name || diagramId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: data
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,
@@ -5744,16 +5763,17 @@ function createChildElement(parentId, body, reqInfo) {
     try {
         const model = app.factory.createModel(options)
 
+        const report = createWriteReport()
         if (body.name && model) {
-            app.engine.setProperty(model, 'name', body.name)
+            applyProperty(report, model, 'name', body.name)
         }
 
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created child "' + (model ? model.name || body.type : body.type) + '" under "' + (parent.name || parentId) + '"',
+            message: appendWriteWarnings('Created child "' + (model ? model.name || body.type : body.type) + '" under "' + (parent.name || parentId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializeElement(model)
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,
@@ -5794,28 +5814,14 @@ function updateViewStyle(id, body, reqInfo) {
         return { success: false, error: 'View not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
+    const report = createWriteReport()
 
-    if (body.fillColor !== undefined) {
-        app.engine.setProperty(view, 'fillColor', body.fillColor)
-        updated.push('fillColor')
-    }
-    if (body.lineColor !== undefined) {
-        app.engine.setProperty(view, 'lineColor', body.lineColor)
-        updated.push('lineColor')
-    }
-    if (body.fontColor !== undefined) {
-        app.engine.setProperty(view, 'fontColor', body.fontColor)
-        updated.push('fontColor')
-    }
-    if (body.showShadow !== undefined) {
-        app.engine.setProperty(view, 'showShadow', body.showShadow)
-        updated.push('showShadow')
-    }
-    if (body.lineStyle !== undefined) {
-        app.engine.setProperty(view, 'lineStyle', body.lineStyle)
-        updated.push('lineStyle')
-    }
+    const colorAndLineProps = ['fillColor', 'lineColor', 'fontColor', 'showShadow', 'lineStyle']
+    colorAndLineProps.forEach(function (prop) {
+        if (body[prop] !== undefined) {
+            applyProperty(report, view, prop, body[prop])
+        }
+    })
 
     // Font properties: set together via Font object if any font field is provided
     if (body.fontFace !== undefined || body.fontSize !== undefined || body.fontStyle !== undefined) {
@@ -5824,43 +5830,38 @@ function updateViewStyle(id, body, reqInfo) {
         const size = body.fontSize !== undefined ? body.fontSize : (currentFont.size || 13)
         const style = body.fontStyle !== undefined ? body.fontStyle : (currentFont.style || 0)
         app.engine.setProperty(view, 'font', face + ';' + size + ';' + style)
-        if (body.fontFace !== undefined) updated.push('fontFace')
-        if (body.fontSize !== undefined) updated.push('fontSize')
-        if (body.fontStyle !== undefined) updated.push('fontStyle')
+        // view.font reads back as a Font object, not the string just written, so
+        // compare its three parts rather than the value as a whole.
+        const storedFont = view.font || {}
+        const wanted = { fontFace: face, fontSize: size, fontStyle: style }
+        const stored = { fontFace: storedFont.face, fontSize: storedFont.size, fontStyle: storedFont.style }
+        Object.keys(wanted).forEach(function (f) {
+            if (body[f] === undefined) {
+                return
+            }
+            if (writeValuesEqual(stored[f], wanted[f])) {
+                report.updated.push(f)
+            } else {
+                report.clamped.push({ field: f, requested: wanted[f], actual: stored[f] })
+            }
+        })
     }
 
     // Display control properties
-    if (body.autoResize !== undefined) {
-        app.engine.setProperty(view, 'autoResize', body.autoResize)
-        updated.push('autoResize')
-    }
-    if (body.stereotypeDisplay !== undefined) {
-        app.engine.setProperty(view, 'stereotypeDisplay', body.stereotypeDisplay)
-        updated.push('stereotypeDisplay')
-    }
-    if (body.suppressAttributes !== undefined) {
-        app.engine.setProperty(view, 'suppressAttributes', body.suppressAttributes)
-        updated.push('suppressAttributes')
-    }
-    if (body.suppressOperations !== undefined) {
-        app.engine.setProperty(view, 'suppressOperations', body.suppressOperations)
-        updated.push('suppressOperations')
-    }
-    if (body.suppressReceptions !== undefined) {
-        app.engine.setProperty(view, 'suppressReceptions', body.suppressReceptions)
-        updated.push('suppressReceptions')
-    }
-    if (body.suppressProperties !== undefined) {
-        app.engine.setProperty(view, 'suppressProperties', body.suppressProperties)
-        updated.push('suppressProperties')
-    }
+    const displayProps = ['autoResize', 'stereotypeDisplay', 'suppressAttributes',
+        'suppressOperations', 'suppressReceptions', 'suppressProperties']
+    displayProps.forEach(function (prop) {
+        if (body[prop] !== undefined) {
+            applyProperty(report, view, prop, body[prop])
+        }
+    })
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated style (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated style', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeViewInfo(view)
-    }
+    }, report)
 }
 
 function undoAction(reqInfo) {
@@ -6384,41 +6385,59 @@ function reconnectEdge(id, body, reqInfo) {
         const newTailModel = newTailView.model || null
         const newHeadModel = newHeadView.model || null
 
-        // Update model references (different relationship types use different properties)
-        if (view.model) {
-            if (body.newSourceId && newTailModel) {
+        const report = createWriteReport()
+
+        // Update model references (different relationship types use different properties).
+        // If the model end cannot be rewritten, the view moves and the model does
+        // not — the diagram and the model would then say different things, so say so.
+        if (body.newSourceId) {
+            if (view.model && newTailModel) {
                 if (view.model.end1 && typeof view.model.end1.reference !== 'undefined') {
-                    app.engine.setProperty(view.model.end1, 'reference', newTailModel)
+                    applyProperty(report, view.model.end1, 'reference', newTailModel, 'model.end1.reference')
                 } else if (typeof view.model.source !== 'undefined') {
-                    app.engine.setProperty(view.model, 'source', newTailModel)
+                    applyProperty(report, view.model, 'source', newTailModel, 'model.source')
+                } else {
+                    reportIgnoredWrite(report, 'model.source', body.newSourceId, undefined,
+                        'this relationship type has neither end1.reference nor source; the view moved but the model did not')
                 }
+            } else {
+                reportIgnoredWrite(report, 'model.source', body.newSourceId, undefined,
+                    view.model ? 'the new source view has no model' : 'this edge view has no model')
             }
-            if (body.newTargetId && newHeadModel) {
+        }
+        if (body.newTargetId) {
+            if (view.model && newHeadModel) {
                 if (view.model.end2 && typeof view.model.end2.reference !== 'undefined') {
-                    app.engine.setProperty(view.model.end2, 'reference', newHeadModel)
+                    applyProperty(report, view.model.end2, 'reference', newHeadModel, 'model.end2.reference')
                 } else if (typeof view.model.target !== 'undefined') {
-                    app.engine.setProperty(view.model, 'target', newHeadModel)
+                    applyProperty(report, view.model, 'target', newHeadModel, 'model.target')
+                } else {
+                    reportIgnoredWrite(report, 'model.target', body.newTargetId, undefined,
+                        'this relationship type has neither end2.reference nor target; the view moved but the model did not')
                 }
+            } else {
+                reportIgnoredWrite(report, 'model.target', body.newTargetId, undefined,
+                    view.model ? 'the new target view has no model' : 'this edge view has no model')
             }
         }
 
         // Update view connections
         if (body.newSourceId) {
-            app.engine.setProperty(view, 'tail', newTailView)
+            applyProperty(report, view, 'tail', newTailView, 'view.tail')
         }
         if (body.newTargetId) {
-            app.engine.setProperty(view, 'head', newHeadView)
+            applyProperty(report, view, 'head', newHeadView, 'view.head')
         }
 
         // Clear stale waypoints and re-route edge between new endpoints
         clearEdgeWaypoints(view)
 
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Reconnected edge',
+            message: writeReportMessage('Reconnected edge', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializeViewInfo(view)
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,
@@ -6875,14 +6894,20 @@ function createLinkObject(diagramId, body, reqInfo) {
         }
 
         const model = view.model || view
-        if (body.name && model && typeof model._id === 'string') {
-            app.engine.setProperty(model, 'name', body.name)
+        const report = createWriteReport()
+        if (body.name) {
+            if (model && typeof model._id === 'string') {
+                applyProperty(report, model, 'name', body.name)
+            } else {
+                reportIgnoredWrite(report, 'name', body.name, undefined,
+                    'the created link object has no model element to name')
+            }
         }
 
         autoExpandFrame(diagram)
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created UMLLinkObject on diagram "' + (diagram.name || diagramId) + '"',
+            message: appendWriteWarnings('Created UMLLinkObject on diagram "' + (diagram.name || diagramId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: {
                 _id: view._id,
@@ -6891,7 +6916,7 @@ function createLinkObject(diagramId, body, reqInfo) {
                 modelType: model ? model.constructor.name : undefined,
                 name: model ? model.name || '' : ''
             }
-        }
+        }, report)
     } catch (e) {
         return {
             success: false,

@@ -101,6 +101,40 @@ Restart StarUML to load the extension.
 
 Select **Tools > StarUML Controller > Stop Server** from the menu bar.
 
+## Write Reporting
+
+StarUML accepts a write and then silently changes or discards it: a view height
+below the content minimum is clamped, an edge label ignores `left`/`top`, a field
+whose target does not exist goes nowhere. A response that says `success: true` and
+`Updated ...` for such a write is misleading — and the mistake only surfaces on
+export.
+
+Every create and update endpoint therefore compares each field before and after
+the write and classifies it:
+
+| Outcome | Meaning |
+|---|---|
+| updated | stored as asked |
+| `clamped` | stored, but as a different value |
+| `ignored` | not stored; the previous value stands |
+
+`clamped` and `ignored` appear in the response **only when non-empty**, each entry
+carrying `field`, `requested`, `actual` and sometimes a `reason`. The `message`
+names them too, so a caller that reads only `success` and `message` still learns
+the write was refused:
+
+```json
+{
+  "success": true,
+  "message": "Updated view (fields: left) — CLAMPED: height (requested 1, actual 324)",
+  "data": { "left": 430, "height": 324 },
+  "clamped": [{ "field": "height", "requested": 1, "actual": 324 }]
+}
+```
+
+A clean write returns exactly what it always did — no new fields, and a message in
+the original shape.
+
 ## API Endpoints
 
 ### General
