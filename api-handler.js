@@ -2731,7 +2731,10 @@ const LIFELINE_ALLOWED_FIELDS = ['name', 'stereotype', 'documentation', 'diagram
 const LIFELINE_UPDATE_FIELDS = ['name', 'stereotype', 'documentation']
 const MESSAGE_ALLOWED_FIELDS = ['name', 'messageSort', 'source', 'target', 'diagramId', 'y', 'x', 'activationHeight', 'documentation', 'messageType']
 const VALID_MESSAGE_TYPES = ['UMLMessage', 'UMLFoundMessage', 'UMLLostMessage']
-const MESSAGE_UPDATE_FIELDS = ['name', 'messageSort', 'documentation']
+// y/x/activationHeight live on the message's view, not the model. y is the
+// message's vertical position; x only takes effect on a found/lost message's
+// free endpoint (updateMessage reports it as ignored otherwise).
+const MESSAGE_UPDATE_FIELDS = ['name', 'messageSort', 'documentation', 'y', 'x', 'activationHeight']
 const COMBINED_FRAGMENT_ALLOWED_FIELDS = ['name', 'interactionOperator', 'diagramId', 'x', 'y', 'width', 'height', 'documentation']
 const COMBINED_FRAGMENT_UPDATE_FIELDS = ['name', 'interactionOperator', 'documentation']
 const OPERAND_ALLOWED_FIELDS = ['name', 'guard', 'documentation']
@@ -3437,17 +3440,25 @@ function createMessage(interactionId, body, reqInfo) {
     const msg = view.model
 
     // Resize activation bar if activationHeight is specified
-    if (body.activationHeight !== undefined && view.activation) {
-        app.engine.setProperty(view.activation, 'height', body.activationHeight)
+    const report = createWriteReport()
+    if (body.activationHeight !== undefined) {
+        if (view.activation) {
+            applyProperty(report, view.activation, 'height', body.activationHeight, 'activationHeight')
+        } else {
+            reportIgnoredWrite(report, 'activationHeight', body.activationHeight, undefined,
+                'this message has no activation bar')
+        }
     }
 
     autoExpandFrame(diagram)
-    return {
+    const data = serializeMessage(msg)
+    data.view = serializeMessageView(view)
+    return attachWriteReport({
         success: true,
-        message: 'Created ' + msgType + ' "' + (msg.name || msg._id) + '" with view on diagram "' + diagram.name + '"',
+        message: appendWriteWarnings('Created ' + msgType + ' "' + (msg.name || msg._id) + '" with view on diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
-        data: serializeMessage(msg)
-    }
+        data: data
+    }, report)
 }
 
 function getMessage(id, reqInfo) {
@@ -3455,12 +3466,134 @@ function getMessage(id, reqInfo) {
     if (!msg || !(msg instanceof type.UMLMessage)) {
         return { success: false, error: 'Message not found: ' + id, request: reqInfo }
     }
+    const data = serializeMessage(msg)
+    const view = findMessageView(msg)
+    if (view) {
+        data.view = serializeMessageView(view)
+    }
     return {
         success: true,
         message: 'Retrieved message "' + (msg.name || msg._id) + '"',
         request: reqInfo,
-        data: serializeMessage(msg)
+        data: data
     }
+}
+
+/**
+ * Find the UMLSeqMessageView that draws a message. A message has one view per
+ * diagram it appears on; sequence messages appear on exactly one.
+ */
+function findMessageView(msg) {
+    const views = app.repository.getViewsOf(msg) || []
+    for (let i = 0; i < views.length; i++) {
+        if (typeof type !== 'undefined' && type.UMLSeqMessageView && views[i] instanceof type.UMLSeqMessageView) {
+            return views[i]
+        }
+    }
+    for (let i = 0; i < views.length; i++) {
+        if (views[i].points) {
+            return views[i]
+        }
+    }
+    return null
+}
+
+/**
+ * The loose end of a found or lost message. A regular message is anchored to a
+ * lifeline at both ends, so it has none.
+ */
+function findFreeMessageEndpoint(view) {
+    if (!view || typeof type === 'undefined' || !type.UMLMessageEndpointView) {
+        return null
+    }
+    if (view.head instanceof type.UMLMessageEndpointView) {
+        return view.head
+    }
+    if (view.tail instanceof type.UMLMessageEndpointView) {
+        return view.tail
+    }
+    return null
+}
+
+function serializeMessageView(view) {
+    if (!view) {
+        return null
+    }
+    const result = { _id: view._id, _type: view.constructor.name }
+    if (view.points && typeof view.points.count === 'function' && view.points.count() >= 2) {
+        const first = view.points.getPoint(0)
+        const last = view.points.getPoint(view.points.count() - 1)
+        // points[0].y is the message's vertical position; every other point
+        // derives from it during layout.
+        result.y = first.y
+        result.x1 = first.x
+        result.y1 = first.y
+        result.x2 = last.x
+        result.y2 = last.y
+    }
+    if (view.activation && view.activation.height !== undefined) {
+        result.activationHeight = view.activation.height
+    }
+    return result
+}
+
+/**
+ * Move a sequence message vertically.
+ *
+ * UMLSeqMessageView is an EdgeView. Its arrangeObject() recomputes every point's
+ * x from the lifelines and activations on each layout pass, but carries
+ * points[0].y through unchanged — so y is the authoritative position and x is
+ * not settable for a regular message. The whole polyline is shifted rather than
+ * flattened, which keeps the shape of a self-message (4 points spanning
+ * SELF_MESSAGE_HEIGHT).
+ *
+ * Sequence numbers need no fixing here: UMLSequenceDiagram.drawDiagram() calls
+ * regulateSequenceNumber() on every message view, which reorders the model's
+ * message list to match the new y.
+ *
+ * Returns the y actually stored, or null when the view has no usable points.
+ */
+function setMessageViewY(edgeView, y) {
+    if (!edgeView || !edgeView.points || typeof edgeView.points.clear !== 'function') {
+        return null
+    }
+    if (typeof edgeView.points.count !== 'function' || edgeView.points.count() < 2) {
+        return null
+    }
+
+    const count = edgeView.points.count()
+    const baseY = edgeView.points.getPoint(0).y
+    const shifted = []
+    for (let i = 0; i < count; i++) {
+        const p = edgeView.points.getPoint(i)
+        shifted.push(new type.Point(p.x, p.y - baseY + y))
+    }
+
+    // memento/diff/operationBuilder keeps the move on the undo stack,
+    // the same pattern clearEdgeWaypoints uses.
+    const memento = {}
+    edgeView.assignTo(memento)
+
+    edgeView.points.clear()
+    for (let i = 0; i < shifted.length; i++) {
+        edgeView.points.add(shifted[i])
+    }
+
+    const diffs = edgeView.diff(memento)
+    edgeView.assignFrom(memento)
+
+    if (diffs && diffs.length > 0) {
+        const operationBuilder = app.repository.getOperationBuilder()
+        operationBuilder.begin('move message')
+        for (let i = 0; i < diffs.length; i++) {
+            const d = diffs[i]
+            operationBuilder.fieldAssign(d.elem, d.f, d.n)
+        }
+        operationBuilder.end()
+        app.repository.doOperation(operationBuilder.getOperation())
+    }
+
+    return edgeView.points.getPoint(0).y
 }
 
 function updateMessage(id, body, reqInfo) {
@@ -3468,7 +3601,10 @@ function updateMessage(id, body, reqInfo) {
         checkUnknownFields(body, MESSAGE_UPDATE_FIELDS),
         checkFieldType(body, 'name', 'string'),
         checkFieldType(body, 'messageSort', 'string'),
-        checkFieldType(body, 'documentation', 'string')
+        checkFieldType(body, 'documentation', 'string'),
+        checkFieldType(body, 'y', 'number'),
+        checkFieldType(body, 'x', 'number'),
+        checkFieldType(body, 'activationHeight', 'number')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -3487,26 +3623,67 @@ function updateMessage(id, body, reqInfo) {
         return { success: false, error: 'Message not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
-    if (body.name !== undefined) {
-        app.engine.setProperty(msg, 'name', body.name)
-        updated.push('name')
-    }
-    if (body.messageSort !== undefined) {
-        app.engine.setProperty(msg, 'messageSort', body.messageSort)
-        updated.push('messageSort')
-    }
-    if (body.documentation !== undefined) {
-        app.engine.setProperty(msg, 'documentation', body.documentation)
-        updated.push('documentation')
+    const wantsGeometry = body.y !== undefined || body.x !== undefined || body.activationHeight !== undefined
+    const view = wantsGeometry ? findMessageView(msg) : null
+    if (wantsGeometry && !view) {
+        return validationError('Message "' + (msg.name || msg._id) + '" has no view, so y, x and activationHeight cannot be set', reqInfo, body)
     }
 
-    return {
-        success: true,
-        message: 'Updated message "' + (msg.name || msg._id) + '" (fields: ' + updated.join(', ') + ')',
-        request: Object.assign({}, reqInfo, { body: body }),
-        data: serializeMessage(msg)
+    const report = createWriteReport()
+    if (body.name !== undefined) {
+        applyProperty(report, msg, 'name', body.name)
     }
+    if (body.messageSort !== undefined) {
+        applyProperty(report, msg, 'messageSort', body.messageSort)
+    }
+    if (body.documentation !== undefined) {
+        applyProperty(report, msg, 'documentation', body.documentation)
+    }
+
+    if (body.y !== undefined) {
+        const actualY = setMessageViewY(view, body.y)
+        if (actualY === null) {
+            reportIgnoredWrite(report, 'y', body.y, null, 'message view has no polyline to move')
+        } else if (writeValuesEqual(actualY, body.y)) {
+            report.updated.push('y')
+        } else {
+            report.clamped.push({ field: 'y', requested: body.y, actual: actualY })
+        }
+    }
+
+    if (body.x !== undefined) {
+        // Only a found/lost message has a free endpoint whose x survives layout.
+        // For a regular message every x is recomputed from the lifelines.
+        const endpoint = findFreeMessageEndpoint(view)
+        if (endpoint) {
+            applyProperty(report, endpoint, 'left', body.x, 'x')
+        } else {
+            const current = view.points && view.points.count() >= 1 ? view.points.getPoint(0).x : null
+            reportIgnoredWrite(report, 'x', body.x, current,
+                'a regular message takes its x from the lifelines on every layout pass; only UMLFoundMessage/UMLLostMessage have a settable endpoint x')
+        }
+    }
+
+    if (body.activationHeight !== undefined) {
+        if (view.activation) {
+            applyProperty(report, view.activation, 'height', body.activationHeight, 'activationHeight')
+        } else {
+            reportIgnoredWrite(report, 'activationHeight', body.activationHeight, null, 'this message has no activation bar')
+        }
+    }
+
+    const data = serializeMessage(msg)
+    const msgView = view || findMessageView(msg)
+    if (msgView) {
+        data.view = serializeMessageView(msgView)
+    }
+
+    return attachWriteReport({
+        success: true,
+        message: writeReportMessage('Updated message "' + (msg.name || msg._id) + '"', report),
+        request: Object.assign({}, reqInfo, { body: body }),
+        data: data
+    }, report)
 }
 
 function deleteMessage(id, reqInfo) {

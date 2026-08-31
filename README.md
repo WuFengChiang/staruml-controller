@@ -221,7 +221,7 @@ the original shape.
 | `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines |
 | `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline |
 | `/api/seq/interactions/:id/messages` | GET / POST | List or create messages |
-| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message |
+| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`; GET and PUT return the view geometry in `data.view` |
 | `/api/seq/interactions/:id/combined-fragments` | GET / POST | List or create combined fragments |
 | `/api/seq/combined-fragments/:id` | GET / PUT / DELETE | Get, update, or delete combined fragment |
 | `/api/seq/combined-fragments/:id/operands` | GET / POST | List or add operands |
