@@ -7680,10 +7680,24 @@ function decodePathParam(value) {
  * The full type and endpoint listing used to live here and made every call
  * cost about 46 KB; it moved to buildCapabilities().
  */
+// Read once at load. The status endpoint used to report a hardcoded '1.0.0',
+// which had drifted from package.json's 1.1.2 — a version that contradicts the
+// manifest is worse than none, because callers trust it. Note that this still
+// only reports the declared version: it cannot tell you whether a running
+// StarUML has picked up edited files, since the number does not change when the
+// code does. To check that, probe for a route the build in question added.
+const EXTENSION_VERSION = (function () {
+    try {
+        return require('./package.json').version || 'unknown'
+    } catch (e) {
+        return 'unknown'
+    }
+})()
+
 function buildStatus() {
     const data = {
         status: 'running',
-        version: '1.0.0',
+        version: EXTENSION_VERSION,
         capabilities: 'GET /api/status/capabilities'
     }
     try {
