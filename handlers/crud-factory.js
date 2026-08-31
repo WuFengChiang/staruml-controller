@@ -507,16 +507,17 @@ function makeUpdateDiagram(config) {
             return { success: false, error: 'Diagram not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
+        const report = h.createWriteReport()
         if (body.name !== undefined) {
-            app.engine.setProperty(diagram, 'name', body.name)
+            h.applyProperty(report, diagram, 'name', body.name)
         }
 
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated diagram "' + diagram.name + '"',
+            message: h.writeReportMessage('Updated diagram "' + diagram.name + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: h.serializeGenericDiagramDetail(diagram)
-        }
+        }, report)
     }
 }
 
@@ -767,15 +768,18 @@ function makeCreateResource(config, res) {
             const view = app.factory.createModelAndView(factoryOpts)
             const model = view.model || view
 
-            if (body.name && model && typeof model._id === 'string') {
-                app.engine.setProperty(model, 'name', body.name)
+            const report = h.createWriteReport()
+            const hasModel = model && typeof model._id === 'string'
+
+            if (body.name && hasModel) {
+                h.applyProperty(report, model, 'name', body.name)
                 // Propagate name to child UMLInteraction (used by Interaction Overview Diagram).
                 // StarUML creates UMLAction + child UMLInteraction; the view displays the child's name.
                 propagateNameToChildInteraction(model, body.name)
             }
 
-            if (body.stereotype !== undefined && model && typeof model._id === 'string') {
-                app.engine.setProperty(model, 'stereotype', body.stereotype)
+            if (body.stereotype !== undefined && hasModel) {
+                h.applyProperty(report, model, 'stereotype', body.stereotype)
             }
 
             // Apply extra fields via setProperty
@@ -783,8 +787,13 @@ function makeCreateResource(config, res) {
                 res.createFields.forEach(function (f) {
                     const entry = parseFieldEntry(f)
                     if (body[entry.param] !== undefined && entry.param !== 'name' && entry.param !== 'diagramId' && entry.param !== 'type' && entry.param !== 'tailViewId') {
-                        if (model && typeof model._id === 'string') {
-                            app.engine.setProperty(model, entry.prop, body[entry.param])
+                        if (hasModel) {
+                            h.applyProperty(report, model, entry.prop, body[entry.param], entry.param)
+                        } else {
+                            // These used to be dropped without a word when the
+                            // factory returned a view with no model element.
+                            h.reportIgnoredWrite(report, entry.param, body[entry.param], undefined,
+                                'the created ' + elemType + ' has no model element to store it on')
                         }
                     }
                 })
@@ -794,7 +803,7 @@ function makeCreateResource(config, res) {
             const styleProps = ['lineColor', 'fillColor', 'fontColor']
             styleProps.forEach(function (prop) {
                 if (body[prop] !== undefined) {
-                    app.engine.setProperty(view, prop, body[prop])
+                    h.applyProperty(report, view, prop, body[prop])
                 }
             })
 
@@ -802,12 +811,12 @@ function makeCreateResource(config, res) {
             h.autoExpandFrame(diagram)
 
             const serializer = res.serialize || defaultSerializeNode
-            return {
+            return h.attachWriteReport({
                 success: true,
-                message: 'Created ' + res.name.replace(/-/g, ' ') + ' "' + (model ? model.name || elemType : elemType) + '"',
+                message: h.appendWriteWarnings('Created ' + res.name.replace(/-/g, ' ') + ' "' + (model ? model.name || elemType : elemType) + '"', report),
                 request: Object.assign({}, reqInfo, { body: body }),
                 data: serializer(model)
-            }
+            }, report)
         } catch (e) {
             return { success: false, error: 'Failed to create element: ' + (e.message || String(e)), request: Object.assign({}, reqInfo, { body: body }) }
         }
@@ -870,11 +879,10 @@ function makeUpdateResource(config, res) {
             return { success: false, error: res.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
-        const updated = []
+        const report = h.createWriteReport()
         fieldDefs.forEach(function (d) {
             if (body[d.name] !== undefined) {
-                app.engine.setProperty(elem, d.prop, body[d.name])
-                updated.push(d.name)
+                h.applyProperty(report, elem, d.prop, body[d.name], d.name)
                 // Propagate name to child UMLInteraction (used by Interaction Overview Diagram)
                 if (d.prop === 'name') {
                     propagateNameToChildInteraction(elem, body[d.name])
@@ -883,12 +891,12 @@ function makeUpdateResource(config, res) {
         })
 
         const serializer = res.serialize || defaultSerializeNode
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated ' + res.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '" (fields: ' + updated.join(', ') + ')',
+            message: h.writeReportMessage('Updated ' + res.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializer(elem)
-        }
+        }, report)
     }
 }
 
@@ -1060,8 +1068,9 @@ function makeCreateChild(config, res, child) {
                 model = view.model || view
             }
 
+            const report = h.createWriteReport()
             if (body.name && model) {
-                app.engine.setProperty(model, 'name', body.name)
+                h.applyProperty(report, model, 'name', body.name)
             }
 
             // Apply extra fields
@@ -1069,18 +1078,18 @@ function makeCreateChild(config, res, child) {
                 child.createFields.forEach(function (f) {
                     const entry = parseFieldEntry(f)
                     if (body[entry.param] !== undefined && entry.param !== 'name') {
-                        app.engine.setProperty(model, entry.prop, body[entry.param])
+                        h.applyProperty(report, model, entry.prop, body[entry.param], entry.param)
                     }
                 })
             }
 
             const serializer = child.serialize || defaultSerializeChild
-            return {
+            return h.attachWriteReport({
                 success: true,
-                message: 'Created ' + child.name.replace(/-/g, ' ') + ' "' + (model.name || child.type) + '"',
+                message: h.appendWriteWarnings('Created ' + child.name.replace(/-/g, ' ') + ' "' + (model.name || child.type) + '"', report),
                 request: Object.assign({}, reqInfo, { body: body }),
                 data: serializer(model)
-            }
+            }, report)
         } catch (e) {
             return { success: false, error: 'Failed to create ' + child.name.replace(/-/g, ' ') + ': ' + (e.message || String(e)), request: Object.assign({}, reqInfo, { body: body }) }
         }
@@ -1129,21 +1138,20 @@ function makeUpdateChild(config, res, child) {
             return { success: false, error: child.name.replace(/-/g, ' ') + ' not found under ' + res.name.replace(/-/g, ' ') + ' ' + params.id + ': ' + params.childId, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
-        const updated = []
+        const report = h.createWriteReport()
         fieldDefs.forEach(function (d) {
             if (body[d.name] !== undefined) {
-                app.engine.setProperty(elem, d.prop, body[d.name])
-                updated.push(d.name)
+                h.applyProperty(report, elem, d.prop, body[d.name], d.name)
             }
         })
 
         const serializer = child.serialize || defaultSerializeChild
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated ' + child.name.replace(/-/g, ' ') + ' "' + (elem.name || params.childId) + '" (fields: ' + updated.join(', ') + ')',
+            message: h.writeReportMessage('Updated ' + child.name.replace(/-/g, ' ') + ' "' + (elem.name || params.childId) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializer(elem)
-        }
+        }, report)
     }
 }
 
@@ -1273,18 +1281,33 @@ function makeCreateRelation(config, rel) {
             const view = app.factory.createModelAndView(options)
             const model = view.model || view
 
-            if (body.name && model && typeof model._id === 'string') {
-                app.engine.setProperty(model, 'name', body.name)
+            const report = h.createWriteReport()
+            const hasModel = model && typeof model._id === 'string'
+
+            if (body.name && hasModel) {
+                h.applyProperty(report, model, 'name', body.name)
             }
 
             // Apply end1/end2 updates
             if (rel.hasEnds && model) {
-                if (body.end1 && model.end1) {
-                    applyEndFields(model.end1, body.end1, rel.endFields)
-                }
-                if (body.end2 && model.end2) {
-                    applyEndFields(model.end2, body.end2, rel.endFields)
-                }
+                ['end1', 'end2'].forEach(function (endName) {
+                    if (!body[endName]) {
+                        return
+                    }
+                    if (model[endName]) {
+                        applyEndFields(model[endName], body[endName], rel.endFields, report, endName)
+                    } else {
+                        h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                            'the created ' + rel.type + ' has no ' + endName)
+                    }
+                })
+            } else if (model) {
+                ['end1', 'end2'].forEach(function (endName) {
+                    if (body[endName] !== undefined) {
+                        h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                            'this relation type has no ends')
+                    }
+                })
             }
 
             // Apply extra fields
@@ -1292,8 +1315,11 @@ function makeCreateRelation(config, rel) {
                 rel.createFields.forEach(function (f) {
                     const entry = parseFieldEntry(f)
                     if (body[entry.param] !== undefined && entry.param !== 'name' && entry.param !== 'diagramId' && entry.param !== 'sourceId' && entry.param !== 'targetId' && entry.param !== 'end1' && entry.param !== 'end2') {
-                        if (model && typeof model._id === 'string') {
-                            app.engine.setProperty(model, entry.prop, body[entry.param])
+                        if (hasModel) {
+                            h.applyProperty(report, model, entry.prop, body[entry.param], entry.param)
+                        } else {
+                            h.reportIgnoredWrite(report, entry.param, body[entry.param], undefined,
+                                'the created ' + rel.type + ' has no model element to store it on')
                         }
                     }
                 })
@@ -1303,7 +1329,7 @@ function makeCreateRelation(config, rel) {
             const styleProps = ['lineColor', 'fillColor', 'fontColor']
             styleProps.forEach(function (prop) {
                 if (body[prop] !== undefined) {
-                    app.engine.setProperty(view, prop, body[prop])
+                    h.applyProperty(report, view, prop, body[prop])
                 }
             })
 
@@ -1311,25 +1337,39 @@ function makeCreateRelation(config, rel) {
             h.autoExpandFrame(diagram)
 
             const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
-            return {
+            return h.attachWriteReport({
                 success: true,
-                message: 'Created ' + rel.name.replace(/-/g, ' ') + ' "' + (model ? model.name || rel.type : rel.type) + '"',
+                message: h.appendWriteWarnings('Created ' + rel.name.replace(/-/g, ' ') + ' "' + (model ? model.name || rel.type : rel.type) + '"', report),
                 request: Object.assign({}, reqInfo, { body: body }),
                 data: relSerializer(model)
-            }
+            }, report)
         } catch (e) {
             return { success: false, error: 'Failed to create relation: ' + (e.message || String(e)), request: Object.assign({}, reqInfo, { body: body }) }
         }
     }
 }
 
-function applyEndFields(end, values, endFields) {
+function applyEndFields(end, values, endFields, report, endName) {
     const fields = endFields || ['name', 'navigable', 'aggregation', 'multiplicity']
     fields.forEach(function (f) {
         if (values[f] !== undefined) {
-            app.engine.setProperty(end, f, values[f])
+            if (report) {
+                h.applyProperty(report, end, f, values[f], (endName || 'end') + '.' + f)
+            } else {
+                app.engine.setProperty(end, f, values[f])
+            }
         }
     })
+    // A field the caller sent that this relation's end does not accept would
+    // otherwise vanish without a word.
+    if (report) {
+        Object.keys(values).forEach(function (f) {
+            if (fields.indexOf(f) === -1) {
+                h.reportIgnoredWrite(report, (endName || 'end') + '.' + f, values[f], undefined,
+                    'not a settable field on this relation end; settable: ' + fields.join(', '))
+            }
+        })
+    }
 }
 
 function makeGetRelation(config, rel) {
@@ -1381,35 +1421,44 @@ function makeUpdateRelation(config, rel) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
-        const updated = []
+        const report = h.createWriteReport()
         // Write to d.prop, not d.name: a field may expose a different parameter
         // name than the model property it sets. makeUpdateResource already does
         // this; this path used to ignore prop, which silently wrote nothing.
         fieldDefs.forEach(function (d) {
             if (body[d.name] !== undefined && d.name !== 'end1' && d.name !== 'end2') {
-                app.engine.setProperty(elem, d.prop, body[d.name])
-                updated.push(d.name)
+                h.applyProperty(report, elem, d.prop, body[d.name], d.name)
             }
         })
 
         if (rel.hasEnds) {
-            if (body.end1 && elem.end1) {
-                applyEndFields(elem.end1, body.end1, rel.endFields)
-                updated.push('end1')
-            }
-            if (body.end2 && elem.end2) {
-                applyEndFields(elem.end2, body.end2, rel.endFields)
-                updated.push('end2')
-            }
+            ['end1', 'end2'].forEach(function (endName) {
+                if (!body[endName]) {
+                    return
+                }
+                if (elem[endName]) {
+                    applyEndFields(elem[endName], body[endName], rel.endFields, report, endName)
+                } else {
+                    h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                        'this relation has no ' + endName + ' to write to')
+                }
+            })
+        } else {
+            ['end1', 'end2'].forEach(function (endName) {
+                if (body[endName] !== undefined) {
+                    h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                        'this relation type has no ends')
+                }
+            })
         }
 
         const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated ' + rel.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '" (fields: ' + updated.join(', ') + ')',
+            message: h.writeReportMessage('Updated ' + rel.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: relSerializer(elem)
-        }
+        }, report)
     }
 }
 

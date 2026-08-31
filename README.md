@@ -101,6 +101,40 @@ Restart StarUML to load the extension.
 
 Select **Tools > StarUML Controller > Stop Server** from the menu bar.
 
+## Write Reporting
+
+StarUML accepts a write and then silently changes or discards it: a view height
+below the content minimum is clamped, an edge label ignores `left`/`top`, a field
+whose target does not exist goes nowhere. A response that says `success: true` and
+`Updated ...` for such a write is misleading — and the mistake only surfaces on
+export.
+
+Every create and update endpoint therefore compares each field before and after
+the write and classifies it:
+
+| Outcome | Meaning |
+|---|---|
+| updated | stored as asked |
+| `clamped` | stored, but as a different value |
+| `ignored` | not stored; the previous value stands |
+
+`clamped` and `ignored` appear in the response **only when non-empty**, each entry
+carrying `field`, `requested`, `actual` and sometimes a `reason`. The `message`
+names them too, so a caller that reads only `success` and `message` still learns
+the write was refused:
+
+```json
+{
+  "success": true,
+  "message": "Updated view (fields: left) — CLAMPED: height (requested 1, actual 324)",
+  "data": { "left": 430, "height": 324 },
+  "clamped": [{ "field": "height", "requested": 1, "actual": 324 }]
+}
+```
+
+A clean write returns exactly what it always did — no new fields, and a message in
+the original shape.
+
 ## API Endpoints
 
 ### General
@@ -135,8 +169,9 @@ Select **Tools > StarUML Controller > Stop Server** from the menu bar.
 | `/api/free-lines/:id` | DELETE | Delete free line |
 | `/api/diagrams/:id/shapes` | GET / POST | List or create shapes |
 | `/api/shapes/:id` | GET / PUT / DELETE | Get, update, or delete shape |
-| `/api/diagrams/:id/views` | GET | List all views on diagram |
-| `/api/views/:id` | PUT | Move/resize view |
+| `/api/diagrams/:id/views` | GET | List all views on diagram (top level only — use `/subviews` for nested) |
+| `/api/views/:id/subviews` | GET | List views nested inside a view (edge labels, state regions). `?recursive=true`, `?type=EdgeLabelView` |
+| `/api/views/:id` | PUT | Move/resize view (`left`, `top`, `width`, `height`); position an edge label (`alpha`, `distance`, `edgePosition`) |
 | `/api/views/:id/style` | PUT | Update view style (fillColor, lineColor, autoResize, suppressAttributes, suppressOperations, etc.) |
 | `/api/views/:id/reconnect` | PUT | Reconnect edge to different source/target |
 | `/api/views/align` | POST | Align/distribute views |
@@ -186,7 +221,7 @@ Select **Tools > StarUML Controller > Stop Server** from the menu bar.
 | `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines |
 | `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline |
 | `/api/seq/interactions/:id/messages` | GET / POST | List or create messages |
-| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message |
+| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`; GET and PUT return the view geometry in `data.view` |
 | `/api/seq/interactions/:id/combined-fragments` | GET / POST | List or create combined fragments |
 | `/api/seq/combined-fragments/:id` | GET / PUT / DELETE | Get, update, or delete combined fragment |
 | `/api/seq/combined-fragments/:id/operands` | GET / POST | List or add operands |
