@@ -729,10 +729,15 @@ function makeCreateResource(config, res) {
             }
         }
 
+        // x2/y2 default to a size measured from x1/y1, not to fixed coordinates.
+        // Absolute defaults inverted the rectangle whenever x1/y1 exceeded them:
+        // x1=680,y1=420 with no x2/y2 gave (680,420)-(200,180), which StarUML
+        // normalises to left=200,top=180 — so every element placed past (200,180)
+        // silently stacked in the same spot.
         const x1 = body.x1 !== undefined ? body.x1 : 100
         const y1 = body.y1 !== undefined ? body.y1 : 100
-        const x2 = body.x2 !== undefined ? body.x2 : 200
-        const y2 = body.y2 !== undefined ? body.y2 : 180
+        const x2 = body.x2 !== undefined ? body.x2 : x1 + 100
+        const y2 = body.y2 !== undefined ? body.y2 : y1 + 80
 
         const factoryOpts = {
             id: factoryId,

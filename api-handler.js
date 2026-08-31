@@ -1279,10 +1279,11 @@ function createEntity(body, reqInfo) {
             return validationError('diagramId must refer to an ERDDiagram. Not found or wrong type: ' + body.diagramId, reqInfo, body)
         }
         options.diagram = diagram
+        // x2/y2 default to a size measured from x1/y1. See createDiagramElement.
         options.x1 = body.x1 !== undefined ? body.x1 : 100
         options.y1 = body.y1 !== undefined ? body.y1 : 100
-        options.x2 = body.x2 !== undefined ? body.x2 : 300
-        options.y2 = body.y2 !== undefined ? body.y2 : 200
+        options.x2 = body.x2 !== undefined ? body.x2 : options.x1 + 200
+        options.y2 = body.y2 !== undefined ? body.y2 : options.y1 + 100
         const view = app.factory.createModelAndView(options)
         autoExpandFrame(diagram)
         return {
@@ -4736,13 +4737,16 @@ function createNote(diagramId, body, reqInfo) {
     }
 
     try {
+        const noteX1 = body.x1 !== undefined ? body.x1 : 100
+        const noteY1 = body.y1 !== undefined ? body.y1 : 100
         const view = app.factory.createModelAndView({
             id: 'Note',
             diagram: diagram,
-            x1: body.x1 !== undefined ? body.x1 : 100,
-            y1: body.y1 !== undefined ? body.y1 : 100,
-            x2: body.x2 !== undefined ? body.x2 : 250,
-            y2: body.y2 !== undefined ? body.y2 : 180
+            x1: noteX1,
+            y1: noteY1,
+            // x2/y2 default to a size measured from x1/y1. See createDiagramElement.
+            x2: body.x2 !== undefined ? body.x2 : noteX1 + 150,
+            y2: body.y2 !== undefined ? body.y2 : noteY1 + 80
         })
 
         if (!view) {
@@ -4953,13 +4957,17 @@ function createFreeLine(diagramId, body, reqInfo) {
     }
 
     try {
+        const lineX1 = body.x1 !== undefined ? body.x1 : 100
+        const lineY1 = body.y1 !== undefined ? body.y1 : 100
         const view = app.factory.createModelAndView({
             id: 'FreeLine',
             diagram: diagram,
-            x1: body.x1 !== undefined ? body.x1 : 100,
-            y1: body.y1 !== undefined ? body.y1 : 100,
-            x2: body.x2 !== undefined ? body.x2 : 300,
-            y2: body.y2 !== undefined ? body.y2 : 200
+            x1: lineX1,
+            y1: lineY1,
+            // x2/y2 are this line's far end, defaulting to a length measured from
+            // its start rather than to fixed coordinates. See createDiagramElement.
+            x2: body.x2 !== undefined ? body.x2 : lineX1 + 200,
+            y2: body.y2 !== undefined ? body.y2 : lineY1 + 100
         })
 
         if (!view) {
@@ -5082,13 +5090,16 @@ function createShape(diagramId, body, reqInfo) {
     }
 
     try {
+        const shapeX1 = body.x1 !== undefined ? body.x1 : 100
+        const shapeY1 = body.y1 !== undefined ? body.y1 : 100
         const createOptions = {
             id: body.type,
             diagram: diagram,
-            x1: body.x1 !== undefined ? body.x1 : 100,
-            y1: body.y1 !== undefined ? body.y1 : 100,
-            x2: body.x2 !== undefined ? body.x2 : 200,
-            y2: body.y2 !== undefined ? body.y2 : 150
+            x1: shapeX1,
+            y1: shapeY1,
+            // x2/y2 default to a size measured from x1/y1. See createDiagramElement.
+            x2: body.x2 !== undefined ? body.x2 : shapeX1 + 100,
+            y2: body.y2 !== undefined ? body.y2 : shapeY1 + 50
         }
         // Hyperlink creates a model element and requires a parent Model (the diagram owner)
         if (body.type === 'Hyperlink') {
@@ -6079,10 +6090,16 @@ function createDiagramElement(diagramId, body, reqInfo) {
         parent = diagram
     }
 
+    // x2/y2 default to a size measured from x1/y1, not to fixed coordinates.
+    // Absolute defaults inverted the rectangle whenever x1/y1 exceeded them:
+    // x1=680,y1=420 with no x2/y2 gave (680,420)-(200,180), which StarUML
+    // normalises to left=200,top=180,width=480,height=240 — so every element
+    // placed past (200,180) silently stacked in the same spot, with nothing in
+    // the response to show the coordinates had been reinterpreted.
     const x1 = body.x1 !== undefined ? body.x1 : 100
     const y1 = body.y1 !== undefined ? body.y1 : 100
-    const x2 = body.x2 !== undefined ? body.x2 : 200
-    const y2 = body.y2 !== undefined ? body.y2 : 180
+    const x2 = body.x2 !== undefined ? body.x2 : x1 + 100
+    const y2 = body.y2 !== undefined ? body.y2 : y1 + 80
 
     // Build factory options
     const factoryOpts = {
@@ -7515,10 +7532,11 @@ function createLinkObject(diagramId, body, reqInfo) {
         return validationError('targetId does not have a view on this diagram', reqInfo, body)
     }
 
+    // x2/y2 default to a size measured from x1/y1. See createDiagramElement.
     const x1 = body.x1 !== undefined ? body.x1 : 200
     const y1 = body.y1 !== undefined ? body.y1 : 200
-    const x2 = body.x2 !== undefined ? body.x2 : 300
-    const y2 = body.y2 !== undefined ? body.y2 : 250
+    const x2 = body.x2 !== undefined ? body.x2 : x1 + 100
+    const y2 = body.y2 !== undefined ? body.y2 : y1 + 50
 
     try {
         const view = app.factory.createModelAndView({

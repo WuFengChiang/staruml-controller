@@ -183,6 +183,20 @@ holds a role, and the classifier sits on that role's type, which is why
 through the role rather than naming it. Setting `representTypeId` to a class is
 what makes a lifeline read `ui : OrderService`.
 
+## Placing a New Element
+
+Every create-on-a-diagram endpoint takes `x1`, `y1`, `x2`, `y2`. `x1`/`y1` are the
+top-left corner and `x2`/`y2` the bottom-right, and you can send just the corner:
+`x2`/`y2` then default to a size measured from it, so the element lands where you
+put it.
+
+Until this was fixed, `x2`/`y2` defaulted to fixed coordinates instead. Sending
+`x1: 680, y1: 420` with no `x2`/`y2` produced the rectangle (680,420)-(200,180),
+which StarUML normalises to `left: 200, top: 180, width: 480, height: 240` — the
+element sat at (200,180) and was 480 wide. Anything placed past the default
+corner stacked in that one spot, and nothing in the response showed it. Sending
+all four coordinates always worked, and still behaves exactly as before.
+
 ## What a List Endpoint Returns
 
 `GET /api/{family}/{resource}` returns elements of exactly the declared type.

@@ -132,6 +132,12 @@ class UMLSequenceDiagram extends UMLModelElement {
         this.ownedViews = []
     }
 }
+class UMLClassDiagram extends UMLModelElement {
+    constructor() {
+        super()
+        this.ownedViews = []
+    }
+}
 
 // --- View geometry, enough for message views ---
 class Point {
@@ -174,7 +180,7 @@ const type = {
     UMLInteraction, UMLMessageEndpoint, UMLLifeline, UMLMessage,
     UMLRelationship, UMLDirectedRelationship, UMLDependency, UMLAbstraction,
     UMLRealization, UMLInterfaceRealization, UMLComponentRealization,
-    UMLGeneralization, Hyperlink, Tag, UMLSequenceDiagram,
+    UMLGeneralization, Hyperlink, Tag, UMLSequenceDiagram, UMLClassDiagram,
     Point, UMLSeqMessageView
 }
 type.UMLModel = UMLModel_
@@ -273,6 +279,15 @@ const app = {
                 return makeMessageView(m, options)
             }
             const view = { _id: nextId(), model: m }
+            // StarUML normalises the rectangle it is handed: left/top are the
+            // minimums, width/height the absolute differences. That is what turns
+            // an inverted rectangle into an element sitting somewhere else.
+            if (options.x1 !== undefined && options.x2 !== undefined) {
+                view.left = Math.min(options.x1, options.x2)
+                view.top = Math.min(options.y1, options.y2)
+                view.width = Math.abs(options.x2 - options.x1)
+                view.height = Math.abs(options.y2 - options.y1)
+            }
             if (options.diagram && Array.isArray(options.diagram.ownedViews)) {
                 options.diagram.ownedViews.push(view)
             }

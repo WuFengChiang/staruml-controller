@@ -239,6 +239,46 @@ check('attribute reference type shows in the children list',
     r.success && r.data.length === 1 && r.data[0].typeId === dataType._id,
     r.error || r.data)
 
+console.log('\n=== Placing a new element where it was asked to go ===')
+
+const clsDiagram = mock.register(new t.UMLClassDiagram(), 'Domain', collab)
+
+function lastViewOn(diagram) {
+    const views = diagram.ownedViews
+    return views.length > 0 ? views[views.length - 1] : null
+}
+
+r = api.route('POST', '/api/class/classes',
+    { diagramId: clsDiagram._id, name: 'Placed', x1: 680, y1: 420 })
+check('create a class at x1/y1 only', r.success, r.error)
+let v = lastViewOn(clsDiagram)
+check('left/top are the coordinates that were asked for',
+    v && v.left === 680 && v.top === 420,
+    v && { left: v.left, top: v.top, width: v.width, height: v.height })
+check('the default size is still applied',
+    v && v.width === 100 && v.height === 80,
+    v && { width: v.width, height: v.height })
+
+r = api.route('POST', '/api/class/classes',
+    { diagramId: clsDiagram._id, name: 'Second', x1: 900, y1: 600 })
+const v2 = lastViewOn(clsDiagram)
+check('a second element does not stack on the first',
+    v2 && v2.left === 900 && v2.top === 600 && v2.left !== v.left,
+    v2 && { left: v2.left, top: v2.top })
+
+r = api.route('POST', '/api/class/classes',
+    { diagramId: clsDiagram._id, name: 'Sized', x1: 680, y1: 420, x2: 840, y2: 500 })
+v = lastViewOn(clsDiagram)
+check('all four coordinates still work as before',
+    v && v.left === 680 && v.top === 420 && v.width === 160 && v.height === 80,
+    v && { left: v.left, top: v.top, width: v.width, height: v.height })
+
+r = api.route('POST', '/api/class/classes', { diagramId: clsDiagram._id, name: 'Defaulted' })
+v = lastViewOn(clsDiagram)
+check('no coordinates at all keeps the original defaults',
+    v && v.left === 100 && v.top === 100 && v.width === 100 && v.height === 80,
+    v && { left: v.left, top: v.top, width: v.width, height: v.height })
+
 console.log('\n=== documentation on an operation (peer reported this as impossible) ===')
 r = api.route('PUT', '/api/elements/' + op._id, { documentation: 'Places an order.' })
 check('operation documentation is writable', r.success && r.data.documentation === 'Places an order.', r.error || r.data)
