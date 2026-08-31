@@ -237,6 +237,11 @@ const app = {
         get: function (id) {
             return store.filter(function (e) { return e._id === id })[0] || null
         },
+        search: function (keyword) {
+            return store.filter(function (e) {
+                return typeof e.name === 'string' && e.name.indexOf(keyword) !== -1
+            })
+        },
         // Mirrors StarUML: '@Type' matches the whole inheritance chain.
         select: function (selector) {
             const typeName = selector.replace('@', '')

@@ -283,5 +283,37 @@ console.log('\n=== documentation on an operation (peer reported this as impossib
 r = api.route('PUT', '/api/elements/' + op._id, { documentation: 'Places an order.' })
 check('operation documentation is writable', r.success && r.data.documentation === 'Places an order.', r.error || r.data)
 
+console.log('\n=== Every list endpoint still answers ===')
+
+// The exact-type filter lives in crud-factory, which builds the routes for all
+// 24 diagram families. These three fixtures were not enough to cover that, so
+// walk every collection GET the controller advertises and check none of them
+// errors. An empty result is fine; a thrown error or a "Not found" route is not.
+r = api.route('GET', '/api/status/capabilities')
+check('capabilities lists the endpoints', r.success && Array.isArray(r.data.endpoints), r.error)
+
+const listRoutes = (r.data.endpoints || [])
+    .filter(function (e) { return e.indexOf('GET ') === 0 })
+    .map(function (e) { return e.replace(/^GET\s+/, '') })
+    .filter(function (p) { return p.indexOf(':') === -1 && p.indexOf('/api/status') !== 0 })
+
+const broken = []
+listRoutes.forEach(function (path) {
+    // /api/search requires a keyword. Give it one rather than skipping the route.
+    const url = path === '/api/search' ? '/api/search?keyword=probe' : path
+    let res
+    try {
+        res = api.route('GET', url)
+    } catch (e) {
+        broken.push(path + ' threw ' + (e.message || e))
+        return
+    }
+    if (!res || !res.success) {
+        broken.push(path + ' -> ' + (res && res.error))
+    }
+})
+check(listRoutes.length + ' collection GET routes all answer successfully',
+    broken.length === 0, broken.slice(0, 8))
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)
