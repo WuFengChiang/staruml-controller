@@ -169,8 +169,9 @@ the original shape.
 | `/api/free-lines/:id` | DELETE | Delete free line |
 | `/api/diagrams/:id/shapes` | GET / POST | List or create shapes |
 | `/api/shapes/:id` | GET / PUT / DELETE | Get, update, or delete shape |
-| `/api/diagrams/:id/views` | GET | List all views on diagram |
-| `/api/views/:id` | PUT | Move/resize view |
+| `/api/diagrams/:id/views` | GET | List all views on diagram (top level only — use `/subviews` for nested) |
+| `/api/views/:id/subviews` | GET | List views nested inside a view (edge labels, state regions). `?recursive=true`, `?type=EdgeLabelView` |
+| `/api/views/:id` | PUT | Move/resize view (`left`, `top`, `width`, `height`); position an edge label (`alpha`, `distance`, `edgePosition`) |
 | `/api/views/:id/style` | PUT | Update view style (fillColor, lineColor, autoResize, suppressAttributes, suppressOperations, etc.) |
 | `/api/views/:id/reconnect` | PUT | Reconnect edge to different source/target |
 | `/api/views/align` | POST | Align/distribute views |

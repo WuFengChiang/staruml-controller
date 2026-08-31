@@ -696,8 +696,27 @@ function serializeViewInfo(view) {
     if (view.height !== undefined) {
         result.height = view.height
     }
+    // Parasitic views (edge labels) are positioned by angle and offset, not left/top.
+    // Report them so callers can read back what a write actually produced.
+    if (view.alpha !== undefined) {
+        result.alpha = view.alpha
+    }
+    if (view.distance !== undefined) {
+        result.distance = view.distance
+    }
+    if (view.edgePosition !== undefined) {
+        result.edgePosition = view.edgePosition
+    }
+    if (view.hostEdge) {
+        result.hostEdgeId = view.hostEdge._id
+    }
     return result
 }
+
+// Write reporting helpers (createWriteReport / applyProperty / reportIgnoredWrite /
+// writeReportMessage / attachWriteReport / writeValuesEqual) live in
+// handlers/shared-helpers.js so the CRUD factory shares them. See the require at
+// the top of this file.
 
 // ============================================================
 // Helpers
@@ -829,7 +848,12 @@ const NOTE_ALLOWED_FIELDS = ['text', 'x1', 'y1', 'x2', 'y2']
 const NOTE_UPDATE_FIELDS = ['text']
 const NOTE_LINK_ALLOWED_FIELDS = ['noteId', 'targetId']
 const FREE_LINE_ALLOWED_FIELDS = ['x1', 'y1', 'x2', 'y2']
-const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height']
+// alpha/distance/edgePosition position a parasitic view (edge labels). They are
+// rejected for other view types by the guard in updateView.
+const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height', 'alpha', 'distance', 'edgePosition']
+// EdgeParasiticView.EP_HEAD / EP_MIDDLE / EP_TAIL
+const VALID_EDGE_POSITIONS = [0, 1, 2]
+const EDGE_POSITION_LABELS = { 0: 'EP_HEAD', 1: 'EP_MIDDLE', 2: 'EP_TAIL' }
 const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId']
 const EXPORT_ALLOWED_FIELDS = ['path', 'format']
 const VALID_EXPORT_FORMATS = ['png', 'jpeg', 'svg', 'pdf']
@@ -4899,13 +4923,118 @@ function getDiagramViews(diagramId, reqInfo) {
     }
 }
 
+/**
+ * Describe one sub-view, adding the fields that only matter for nested views:
+ * which named slot it fills on its parent, and its label text.
+ */
+function serializeSubView(view, parent) {
+    const info = serializeViewInfo(view)
+    const namedSlots = ['nameLabel', 'stereotypeLabel', 'propertyLabel', 'qualifierLabel',
+        'multiplicityLabel', 'roleNameLabel', 'frameTypeLabel', 'activation']
+    for (let i = 0; i < namedSlots.length; i++) {
+        if (parent && parent[namedSlots[i]] === view) {
+            info.role = namedSlots[i]
+            break
+        }
+    }
+    if (view.text !== undefined) {
+        info.text = view.text
+    }
+    if (view.visible !== undefined) {
+        info.visible = view.visible
+    }
+    if (view.model) {
+        info.modelId = view.model._id
+    }
+    info._parentId = parent ? parent._id : null
+    return info
+}
+
+/**
+ * List the views nested inside a view.
+ *
+ * GET /api/diagrams/:id/views only returns a diagram's top-level views, so
+ * nested views had to be read out of a saved .mdj file. Two kinds are needed
+ * routinely: the EdgeLabelViews under an edge (their _id is required to set
+ * alpha/distance/edgePosition) and the UMLRegionViews nested under a state's
+ * decomposition compartment.
+ */
+function getSubViews(id, query, reqInfo) {
+    const allowedParams = ['recursive', 'type']
+    const unknownParams = Object.keys(query || {}).filter(function (k) {
+        return allowedParams.indexOf(k) === -1
+    })
+    if (unknownParams.length > 0) {
+        return validationError('Unknown query parameter(s): ' + unknownParams.join(', ') + '. Allowed: ' + allowedParams.join(', '), reqInfo)
+    }
+
+    const view = findById(id)
+    if (!view) {
+        return { success: false, error: 'View not found: ' + id, request: reqInfo }
+    }
+
+    const recursive = query && (query.recursive === 'true' || query.recursive === '1')
+    const wantedType = query && query.type ? query.type : null
+
+    const collected = []
+    function walk(parent, depth) {
+        const subViews = parent.subViews || []
+        for (let i = 0; i < subViews.length; i++) {
+            const sub = subViews[i]
+            if (!sub) {
+                continue
+            }
+            if (!wantedType || sub.constructor.name === wantedType) {
+                const info = serializeSubView(sub, parent)
+                info.depth = depth
+                collected.push(info)
+            }
+            if (recursive) {
+                walk(sub, depth + 1)
+            }
+        }
+    }
+    walk(view, 1)
+
+    return {
+        success: true,
+        message: 'Retrieved ' + collected.length + ' sub-view(s) of ' + view.constructor.name + ' ' + view._id +
+            (recursive ? ' (recursive)' : ' (direct children only; pass ?recursive=true to descend)'),
+        request: reqInfo,
+        data: collected
+    }
+}
+
+/**
+ * A parasitic view rides on a host view instead of holding its own position:
+ * `alpha` is the angle from the host, `distance` the offset from it. Edge labels
+ * are the common case. Detected by type when StarUML exposes it, otherwise by
+ * the presence of both properties.
+ */
+function isParasiticView(view) {
+    if (typeof type !== 'undefined' && type.ParasiticView) {
+        return view instanceof type.ParasiticView
+    }
+    return !!view && view.alpha !== undefined && view.distance !== undefined
+}
+
+function isEdgeParasiticView(view) {
+    if (typeof type !== 'undefined' && type.EdgeParasiticView) {
+        return view instanceof type.EdgeParasiticView
+    }
+    return isParasiticView(view) && view.edgePosition !== undefined
+}
+
 function updateView(id, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, VIEW_UPDATE_FIELDS),
         checkFieldType(body, 'left', 'number'),
         checkFieldType(body, 'top', 'number'),
         checkFieldType(body, 'width', 'number'),
-        checkFieldType(body, 'height', 'number')
+        checkFieldType(body, 'height', 'number'),
+        checkFieldType(body, 'alpha', 'number'),
+        checkFieldType(body, 'distance', 'number'),
+        checkFieldType(body, 'edgePosition', 'number')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -4915,30 +5044,51 @@ function updateView(id, body, reqInfo) {
         return validationError('At least one field must be provided. Allowed fields: ' + VIEW_UPDATE_FIELDS.join(', '), reqInfo, body)
     }
 
+    if (body.edgePosition !== undefined && VALID_EDGE_POSITIONS.indexOf(body.edgePosition) === -1) {
+        const labels = VALID_EDGE_POSITIONS.map(function (p) { return p + '=' + EDGE_POSITION_LABELS[p] })
+        return validationError('Invalid edgePosition ' + body.edgePosition + '. Allowed values: ' + labels.join(', '), reqInfo, body)
+    }
+
     const view = findById(id)
     if (!view) {
         return { success: false, error: 'View not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const updated = []
-    if (body.left !== undefined) {
-        app.engine.setProperty(view, 'left', body.left)
-        updated.push('left')
+    // Reject parasitic geometry on views that have no host to ride on, rather
+    // than accepting the write and dropping it.
+    if ((body.alpha !== undefined || body.distance !== undefined) && !isParasiticView(view)) {
+        return validationError('Fields "alpha" and "distance" are only supported for parasitic views such as EdgeLabelView. This view is a ' + view.constructor.name, reqInfo, body)
     }
-    if (body.top !== undefined) {
-        app.engine.setProperty(view, 'top', body.top)
-        updated.push('top')
-    }
-    if (body.width !== undefined) {
-        app.engine.setProperty(view, 'width', body.width)
-        updated.push('width')
-    }
-    if (body.height !== undefined) {
-        app.engine.setProperty(view, 'height', body.height)
-        updated.push('height')
+    if (body.edgePosition !== undefined && !isEdgeParasiticView(view)) {
+        return validationError('Field "edgePosition" is only supported for edge parasitic views such as EdgeLabelView. This view is a ' + view.constructor.name, reqInfo, body)
     }
 
-    // Re-route connected edges when node position or size changes
+    const report = createWriteReport()
+    if (body.left !== undefined) {
+        applyProperty(report, view, 'left', body.left)
+    }
+    if (body.top !== undefined) {
+        applyProperty(report, view, 'top', body.top)
+    }
+    if (body.width !== undefined) {
+        applyProperty(report, view, 'width', body.width)
+    }
+    if (body.height !== undefined) {
+        applyProperty(report, view, 'height', body.height)
+    }
+    if (body.alpha !== undefined) {
+        applyProperty(report, view, 'alpha', body.alpha)
+    }
+    if (body.distance !== undefined) {
+        applyProperty(report, view, 'distance', body.distance)
+    }
+    if (body.edgePosition !== undefined) {
+        applyProperty(report, view, 'edgePosition', body.edgePosition)
+    }
+
+    // Re-route connected edges when node position or size changes.
+    // Parasitic geometry is deliberately excluded: it moves a label along its
+    // host edge and must not discard hand-placed waypoints on that edge.
     if (body.left !== undefined || body.top !== undefined || body.width !== undefined || body.height !== undefined) {
         try {
             const connectedEdges = app.repository.getEdgeViewsOf(view)
@@ -4952,12 +5102,12 @@ function updateView(id, body, reqInfo) {
         }
     }
 
-    return {
+    return attachWriteReport({
         success: true,
-        message: 'Updated view (fields: ' + updated.join(', ') + ')',
+        message: writeReportMessage('Updated view', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeViewInfo(view)
-    }
+    }, report)
 }
 
 // --- Generic Element Update/Delete ---
@@ -7137,6 +7287,7 @@ function buildCapabilities() {
             'PUT  /api/views/:id',
             'PUT  /api/views/:id/style',
             'PUT  /api/views/:id/reconnect',
+            'GET  /api/views/:id/subviews',
             'POST /api/elements/:id/children',
             'POST /api/erd/postgresql/ddl',
             'POST /api/project/save',
@@ -7888,6 +8039,12 @@ function route(method, url, body) {
     match = path.match(/^\/api\/views\/([^/]+)\/style$/)
     if (match && method === 'PUT') {
         return updateViewStyle(decodePathParam(match[1]), body, reqInfo)
+    }
+
+    // /api/views/:id/subviews
+    match = path.match(/^\/api\/views\/([^/]+)\/subviews$/)
+    if (match && method === 'GET') {
+        return getSubViews(decodePathParam(match[1]), query, reqInfo)
     }
 
     // /api/views/:id
