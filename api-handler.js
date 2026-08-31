@@ -308,7 +308,24 @@ const GENERIC_RELATION_CREATE_FIELDS = ['type', 'sourceId', 'targetId', 'name']
 // Types whose factory functions expect the diagram itself as parent (not diagram._parent).
 // These factory functions internally resolve the actual parent from the diagram.
 const DIAGRAM_AS_PARENT_TYPES = ['SysMLConstraintParameter']
-const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field']
+// `type` here is the element class to create (e.g. 'UMLParameter'). The type a
+// structural feature *has* is a separate concept and goes in typeId/typeName.
+const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field', 'typeId', 'typeName', 'direction']
+// UMLParameter.DK_IN / DK_INOUT / DK_OUT / DK_RETURN. An operation's return type
+// is a parameter with direction 'return'.
+const VALID_PARAMETER_DIRECTIONS = ['in', 'inout', 'out', 'return']
+// Every container field POST /api/elements/:id/children can create into, so the
+// matching GET can read the same children back without being told where to look.
+const CHILD_CONTAINER_FIELDS = (function () {
+    const fields = []
+    Object.keys(CHILD_TYPE_DEFAULT_FIELDS).forEach(function (t) {
+        const f = CHILD_TYPE_DEFAULT_FIELDS[t]
+        if (fields.indexOf(f) === -1) {
+            fields.push(f)
+        }
+    })
+    return fields
+})()
 const LAYOUT_ALLOWED_FIELDS = ['direction', 'separations', 'edgeLineStyle']
 const IMPORT_ALLOWED_FIELDS = ['path', 'parentId']
 const VALID_LAYOUT_DIRECTIONS = ['TB', 'BT', 'LR', 'RL']
@@ -457,6 +474,22 @@ function serializeElement(elem) {
         if (elem.reference && elem.reference.name !== undefined) {
             result.referenceName = elem.reference.name
         }
+    }
+    // Structural features (UMLAttribute, UMLParameter, UMLPort, ...) keep the
+    // type they have in `type`, which holds either a Model reference or a plain
+    // string. Report both shapes under the same names the writes take.
+    if (elem instanceof type.UMLStructuralFeature && elem.type !== undefined && elem.type !== null && elem.type !== '') {
+        if (typeof elem.type === 'object') {
+            result.typeId = elem.type._id
+            result.typeName = elem.type.name || ''
+        } else if (typeof elem.type === 'string') {
+            result.typeName = elem.type
+        }
+    }
+    // An operation's return type is a parameter with direction 'return', so the
+    // direction has to be visible for the return type to be findable at all.
+    if (elem instanceof type.UMLParameter && typeof elem.direction === 'string' && elem.direction !== '') {
+        result.direction = elem.direction
     }
     if (elem.url !== undefined) {
         result.url = elem.url
@@ -854,7 +887,7 @@ const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height', 'alpha', 'distance
 // EdgeParasiticView.EP_HEAD / EP_MIDDLE / EP_TAIL
 const VALID_EDGE_POSITIONS = [0, 1, 2]
 const EDGE_POSITION_LABELS = { 0: 'EP_HEAD', 1: 'EP_MIDDLE', 2: 'EP_TAIL' }
-const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId']
+const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId', 'typeId', 'typeName', 'direction']
 const EXPORT_ALLOWED_FIELDS = ['path', 'format']
 const VALID_EXPORT_FORMATS = ['png', 'jpeg', 'svg', 'pdf']
 
@@ -2504,11 +2537,69 @@ function serializeLifeline(lifeline) {
     const result = serializeElement(lifeline)
     if (lifeline.represent) {
         result.represent = lifeline.represent._id
+        // `represent` alone is the role's id, which says nothing about what the
+        // lifeline stands for. The classifier lives on the role's `type` and is
+        // either a Model reference or a plain string.
+        const represented = lifeline.represent.type
+        if (represented && typeof represented === 'object') {
+            result.representTypeId = represented._id
+            result.representTypeName = represented.name || ''
+        } else if (typeof represented === 'string' && represented.length > 0) {
+            result.representTypeName = represented
+        }
     }
     if (lifeline._parent) {
         result._parentId = lifeline._parent._id
     }
     return result
+}
+
+/**
+ * Work out what to store on lifeline.represent.type, before anything is built.
+ *
+ * representTypeId takes an element id and stores a reference; representTypeName
+ * takes a bare type name and stores a string; representTypeId: null clears it.
+ * Resolving up front keeps createLifeline from building a lifeline and then
+ * failing validation, which would report an error for a lifeline that exists.
+ * Returns { skip }, { error } or { value, field }.
+ */
+function resolveRepresentType(body) {
+    if (body.representTypeId === undefined && body.representTypeName === undefined) {
+        return { skip: true }
+    }
+    if (body.representTypeId !== undefined && body.representTypeName !== undefined) {
+        return { error: 'Fields "representTypeId" and "representTypeName" are mutually exclusive. Provide one of them.' }
+    }
+    if (body.representTypeName !== undefined) {
+        return { value: body.representTypeName, field: 'representTypeName' }
+    }
+    if (body.representTypeId === null) {
+        return { value: null, field: 'representTypeId' }
+    }
+    const classifier = findById(body.representTypeId)
+    if (!classifier) {
+        return { error: 'representTypeId not found: ' + body.representTypeId }
+    }
+    if (!(classifier instanceof type.UMLClassifier)) {
+        return { error: 'representTypeId must refer to a UMLClassifier (class, interface, actor, use case, component, ...). Got ' + classifier.constructor.name }
+    }
+    return { value: classifier, field: 'representTypeId' }
+}
+
+/**
+ * Write a resolved represent type onto the lifeline's role.
+ * Returns an error string only when the lifeline carries no role at all.
+ */
+function applyRepresentType(report, lifeline, resolved) {
+    if (resolved.skip) {
+        return null
+    }
+    const role = lifeline.represent
+    if (!role) {
+        return 'Lifeline "' + (lifeline.name || lifeline._id) + '" has no represent role, so its type cannot be set'
+    }
+    applyProperty(report, role, 'type', resolved.value, resolved.field)
+    return null
 }
 
 function serializeMessage(msg) {
@@ -2727,8 +2818,12 @@ const INTERACTION_ALLOWED_FIELDS = ['name', 'documentation']
 const INTERACTION_UPDATE_FIELDS = ['name', 'documentation']
 const SEQ_DIAGRAM_ALLOWED_FIELDS = ['parentId', 'name', 'width', 'height', 'documentation']
 const SEQ_DIAGRAM_UPDATE_FIELDS = ['name', 'documentation']
-const LIFELINE_ALLOWED_FIELDS = ['name', 'stereotype', 'documentation', 'diagramId', 'x', 'y', 'height']
-const LIFELINE_UPDATE_FIELDS = ['name', 'stereotype', 'documentation']
+// representTypeId/representTypeName set the classifier a lifeline stands for.
+// StarUML keeps that two levels down: UMLLifeline.represent holds a role (a
+// UMLAttribute the lifeline factory creates), and the classifier sits on the
+// role's `type`, which accepts either a Model reference or a plain string.
+const LIFELINE_ALLOWED_FIELDS = ['name', 'stereotype', 'documentation', 'diagramId', 'x', 'y', 'height', 'representTypeId', 'representTypeName']
+const LIFELINE_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'representTypeId', 'representTypeName']
 const MESSAGE_ALLOWED_FIELDS = ['name', 'messageSort', 'source', 'target', 'diagramId', 'y', 'x', 'activationHeight', 'documentation', 'messageType']
 const VALID_MESSAGE_TYPES = ['UMLMessage', 'UMLFoundMessage', 'UMLLostMessage']
 // y/x/activationHeight live on the message's view, not the model. y is the
@@ -3095,7 +3190,9 @@ function createLifeline(interactionId, body, reqInfo) {
         checkFieldType(body, 'diagramId', 'string'),
         checkFieldType(body, 'x', 'number'),
         checkFieldType(body, 'y', 'number'),
-        checkFieldType(body, 'height', 'number')
+        checkFieldType(body, 'height', 'number'),
+        checkFieldType(body, 'representTypeId', 'string|null'),
+        checkFieldType(body, 'representTypeName', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -3106,6 +3203,11 @@ function createLifeline(interactionId, body, reqInfo) {
         if (nameErr) {
             return validationError(nameErr, reqInfo, body)
         }
+    }
+
+    const represent = resolveRepresentType(body)
+    if (represent.error) {
+        return validationError(represent.error, reqInfo, body)
     }
 
     const interaction = findById(interactionId)
@@ -3140,13 +3242,18 @@ function createLifeline(interactionId, body, reqInfo) {
         if (!view || !view.model) {
             return { success: false, error: 'Failed to create lifeline view on diagram. Ensure the interaction has a valid parent hierarchy (UMLCollaboration).', request: Object.assign({}, reqInfo, { body: body }) }
         }
+        const viewReport = createWriteReport()
+        const viewRepresentErr = applyRepresentType(viewReport, view.model, represent)
+        if (viewRepresentErr) {
+            return validationError(viewRepresentErr, reqInfo, body)
+        }
         autoExpandFrame(diagram)
-        return {
+        return attachWriteReport({
             success: true,
-            message: 'Created lifeline "' + view.model.name + '" with view on diagram "' + diagram.name + '"',
+            message: appendWriteWarnings('Created lifeline "' + view.model.name + '" with view on diagram "' + diagram.name + '"', viewReport),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializeLifeline(view.model)
-        }
+        }, viewReport)
     }
 
     const lifeline = app.factory.createModel({
@@ -3168,12 +3275,18 @@ function createLifeline(interactionId, body, reqInfo) {
         return { success: false, error: 'Failed to create lifeline model. Ensure the interaction has a valid parent hierarchy (UMLCollaboration).', request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    return {
+    const report = createWriteReport()
+    const representErr = applyRepresentType(report, lifeline, represent)
+    if (representErr) {
+        return validationError(representErr, reqInfo, body)
+    }
+
+    return attachWriteReport({
         success: true,
-        message: 'Created lifeline "' + lifeline.name + '"',
+        message: appendWriteWarnings('Created lifeline "' + lifeline.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeLifeline(lifeline)
-    }
+    }, report)
 }
 
 function getLifeline(id, reqInfo) {
@@ -3194,7 +3307,9 @@ function updateLifeline(id, body, reqInfo) {
         checkUnknownFields(body, LIFELINE_UPDATE_FIELDS),
         checkFieldType(body, 'name', 'string'),
         checkFieldType(body, 'stereotype', 'string'),
-        checkFieldType(body, 'documentation', 'string')
+        checkFieldType(body, 'documentation', 'string'),
+        checkFieldType(body, 'representTypeId', 'string|null'),
+        checkFieldType(body, 'representTypeName', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -3211,6 +3326,11 @@ function updateLifeline(id, body, reqInfo) {
         }
     }
 
+    const represent = resolveRepresentType(body)
+    if (represent.error) {
+        return validationError(represent.error, reqInfo, body)
+    }
+
     const lifeline = findById(id)
     if (!lifeline || !(lifeline instanceof type.UMLLifeline)) {
         return { success: false, error: 'Lifeline not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
@@ -3225,6 +3345,10 @@ function updateLifeline(id, body, reqInfo) {
     }
     if (body.documentation !== undefined) {
         applyProperty(report, lifeline, 'documentation', body.documentation)
+    }
+    const representErr = applyRepresentType(report, lifeline, represent)
+    if (representErr) {
+        return validationError(representErr, reqInfo, body)
     }
 
     return attachWriteReport({
@@ -3451,6 +3575,13 @@ function createMessage(interactionId, body, reqInfo) {
     }
 
     autoExpandFrame(diagram)
+
+    // Read the y back only after the frame settles, so the report describes
+    // where the message actually is rather than where it was asked to go.
+    if (body.y !== undefined) {
+        reportMessageY(report, view, body.y)
+    }
+
     const data = serializeMessage(msg)
     data.view = serializeMessageView(view)
     return attachWriteReport({
@@ -3594,6 +3725,38 @@ function setMessageViewY(edgeView, y) {
     }
 
     return edgeView.points.getPoint(0).y
+}
+
+/**
+ * The y a message view actually sits at, or null when it has no polyline to read.
+ */
+function messageViewY(edgeView) {
+    if (!edgeView || !edgeView.points || typeof edgeView.points.count !== 'function') {
+        return null
+    }
+    if (edgeView.points.count() < 1) {
+        return null
+    }
+    return edgeView.points.getPoint(0).y
+}
+
+/**
+ * Compare where a message view ended up against the y that was asked for, and
+ * record the outcome. StarUML's sequence layout caps how far below the previous
+ * message a new one may sit, so a requested y is often not the stored one — and
+ * a create that does not check this reports success for two messages that now
+ * overlap on a single line.
+ */
+function reportMessageY(report, edgeView, requestedY) {
+    const actualY = messageViewY(edgeView)
+    if (actualY === null) {
+        reportIgnoredWrite(report, 'y', requestedY, null, 'message view has no polyline to read back')
+    } else if (writeValuesEqual(actualY, requestedY)) {
+        report.updated.push('y')
+    } else {
+        report.clamped.push({ field: 'y', requested: requestedY, actual: actualY })
+    }
+    return report
 }
 
 function updateMessage(id, body, reqInfo) {
@@ -5289,16 +5452,88 @@ function updateView(id, body, reqInfo) {
 
 // --- Generic Element Update/Delete ---
 
+/**
+ * Work out what to store on a structural feature's `type`, before anything is
+ * built.
+ *
+ * UMLAttribute, UMLParameter and the other UMLStructuralFeature subclasses hold
+ * the type they have in one `type` property that takes either a Model reference
+ * or a plain string, so typeId and typeName write to the same place. Resolving
+ * up front lets createChildElement reject a bad id before it creates anything.
+ * Returns { skip }, { error } or { value, field }.
+ */
+function resolveFeatureType(body) {
+    if (body.typeId === undefined && body.typeName === undefined) {
+        return { skip: true }
+    }
+    if (body.typeId !== undefined && body.typeName !== undefined) {
+        return { error: 'Fields "typeId" and "typeName" are mutually exclusive. Provide one of them.' }
+    }
+    if (body.typeName !== undefined) {
+        return { value: body.typeName, field: 'typeName' }
+    }
+    if (body.typeId === null) {
+        return { value: null, field: 'typeId' }
+    }
+    const target = findById(body.typeId)
+    if (!target) {
+        return { error: 'typeId not found: ' + body.typeId }
+    }
+    if (!(target instanceof type.UMLClassifier)) {
+        return { error: 'typeId must refer to a UMLClassifier (class, interface, data type, enumeration, signal, ...). Got ' + target.constructor.name }
+    }
+    return { value: target, field: 'typeId' }
+}
+
+/**
+ * Reject typeId/typeName/direction for an element class that has no such
+ * property, rather than reporting a successful write the engine discarded.
+ * Takes the class rather than an instance so createChildElement can check
+ * before it builds anything. Returns an error string, or null when accepted.
+ */
+function checkFeatureFieldsSupported(typeName, isStructuralFeature, isParameter, body, featureType) {
+    if (!featureType.skip && !isStructuralFeature) {
+        return 'Fields "typeId" and "typeName" are only supported for structural features (UMLAttribute, UMLParameter, UMLPort, ...). Got ' + typeName
+    }
+    if (body.direction !== undefined && !isParameter) {
+        return 'Field "direction" is only supported for UMLParameter elements. Got ' + typeName
+    }
+    return null
+}
+
+/**
+ * Same check against a child class named in a request. An unknown class counts
+ * as "not a structural feature", so an unsupported field is refused rather than
+ * waved through.
+ */
+function checkFeatureFieldsForChildType(className, body, featureType) {
+    const childClass = type[className]
+    const isStructuralFeature = !!childClass && childClass.prototype instanceof type.UMLStructuralFeature
+    return checkFeatureFieldsSupported(className, isStructuralFeature, className === 'UMLParameter', body, featureType)
+}
+
 function updateGenericElement(id, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, GENERIC_ELEMENT_UPDATE_FIELDS),
         checkFieldType(body, 'name', 'string'),
         checkFieldType(body, 'stereotype', 'string'),
         checkFieldType(body, 'documentation', 'string'),
-        checkFieldType(body, 'referenceId', 'string|null')
+        checkFieldType(body, 'referenceId', 'string|null'),
+        checkFieldType(body, 'typeId', 'string|null'),
+        checkFieldType(body, 'typeName', 'string'),
+        checkFieldType(body, 'direction', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
+    }
+
+    if (body.direction !== undefined && VALID_PARAMETER_DIRECTIONS.indexOf(body.direction) === -1) {
+        return validationError('Invalid direction "' + body.direction + '". Allowed: ' + VALID_PARAMETER_DIRECTIONS.join(', '), reqInfo, body)
+    }
+
+    const featureType = resolveFeatureType(body)
+    if (featureType.error) {
+        return validationError(featureType.error, reqInfo, body)
     }
 
     if (Object.keys(body).length === 0) {
@@ -5321,6 +5556,17 @@ function updateGenericElement(id, body, reqInfo) {
         return validationError('Field "referenceId" is only supported for Hyperlink elements', reqInfo, body)
     }
 
+    const featureErr = checkFeatureFieldsSupported(
+        elem.constructor.name,
+        elem instanceof type.UMLStructuralFeature,
+        elem instanceof type.UMLParameter,
+        body,
+        featureType
+    )
+    if (featureErr) {
+        return validationError(featureErr, reqInfo, body)
+    }
+
     const report = createWriteReport()
     if (body.name !== undefined) {
         applyProperty(report, elem, 'name', body.name)
@@ -5341,6 +5587,12 @@ function updateGenericElement(id, body, reqInfo) {
             }
             applyProperty(report, elem, 'reference', refTarget, 'reference')
         }
+    }
+    if (!featureType.skip) {
+        applyProperty(report, elem, 'type', featureType.value, featureType.field)
+    }
+    if (body.direction !== undefined) {
+        applyProperty(report, elem, 'direction', body.direction)
     }
 
     return attachWriteReport({
@@ -6053,12 +6305,57 @@ function createDiagramRelation(diagramId, body, reqInfo) {
     }
 }
 
+/**
+ * List an element's child elements.
+ *
+ * The family routes only reach two levels (class → operations), so an
+ * operation's parameters — where a return type lives — had no listing at all.
+ * Without `field` this walks every container POST .../children can write to.
+ */
+function listChildElements(parentId, query, reqInfo) {
+    const requestedField = query && query.field ? query.field : null
+    if (requestedField && CHILD_CONTAINER_FIELDS.indexOf(requestedField) === -1) {
+        return validationError('Unknown child field "' + requestedField + '". Allowed: ' + CHILD_CONTAINER_FIELDS.join(', '), reqInfo)
+    }
+
+    const parent = findById(parentId)
+    if (!parent) {
+        return { success: false, error: 'Parent element not found: ' + parentId, request: reqInfo }
+    }
+
+    const fields = requestedField ? [requestedField] : CHILD_CONTAINER_FIELDS
+    const children = []
+    fields.forEach(function (f) {
+        const list = parent[f]
+        if (!Array.isArray(list)) {
+            return
+        }
+        list.forEach(function (c) {
+            const item = serializeElement(c)
+            if (item) {
+                item.field = f
+                children.push(item)
+            }
+        })
+    })
+
+    return {
+        success: true,
+        message: 'Retrieved ' + children.length + ' child element(s) of "' + (parent.name || parentId) + '"',
+        request: reqInfo,
+        data: children
+    }
+}
+
 function createChildElement(parentId, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, GENERIC_CHILD_CREATE_FIELDS),
         checkFieldType(body, 'type', 'string'),
         checkFieldType(body, 'name', 'string'),
-        checkFieldType(body, 'field', 'string')
+        checkFieldType(body, 'field', 'string'),
+        checkFieldType(body, 'typeId', 'string|null'),
+        checkFieldType(body, 'typeName', 'string'),
+        checkFieldType(body, 'direction', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -6070,6 +6367,20 @@ function createChildElement(parentId, body, reqInfo) {
 
     if (ALLOWED_CHILD_TYPES.indexOf(body.type) === -1) {
         return validationError('Invalid child type "' + body.type + '". Allowed: ' + ALLOWED_CHILD_TYPES.join(', '), reqInfo, body)
+    }
+
+    if (body.direction !== undefined && VALID_PARAMETER_DIRECTIONS.indexOf(body.direction) === -1) {
+        return validationError('Invalid direction "' + body.direction + '". Allowed: ' + VALID_PARAMETER_DIRECTIONS.join(', '), reqInfo, body)
+    }
+
+    const featureType = resolveFeatureType(body)
+    if (featureType.error) {
+        return validationError(featureType.error, reqInfo, body)
+    }
+
+    const childFeatureErr = checkFeatureFieldsForChildType(body.type, body, featureType)
+    if (childFeatureErr) {
+        return validationError(childFeatureErr, reqInfo, body)
     }
 
     const parent = findById(parentId)
@@ -6093,6 +6404,14 @@ function createChildElement(parentId, body, reqInfo) {
         const report = createWriteReport()
         if (body.name && model) {
             applyProperty(report, model, 'name', body.name)
+        }
+        if (model) {
+            if (!featureType.skip) {
+                applyProperty(report, model, 'type', featureType.value, featureType.field)
+            }
+            if (body.direction !== undefined) {
+                applyProperty(report, model, 'direction', body.direction)
+            }
         }
 
         return attachWriteReport({
@@ -7465,6 +7784,7 @@ function buildCapabilities() {
             'PUT  /api/views/:id/style',
             'PUT  /api/views/:id/reconnect',
             'GET  /api/views/:id/subviews',
+            'GET  /api/elements/:id/children',
             'POST /api/elements/:id/children',
             'POST /api/erd/postgresql/ddl',
             'POST /api/project/save',
@@ -8250,8 +8570,13 @@ function route(method, url, body) {
 
     // /api/elements/:id/children
     match = path.match(/^\/api\/elements\/([^/]+)\/children$/)
-    if (match && method === 'POST') {
-        return createChildElement(decodePathParam(match[1]), body, reqInfo)
+    if (match) {
+        if (method === 'GET') {
+            return listChildElements(decodePathParam(match[1]), query, reqInfo)
+        }
+        if (method === 'POST') {
+            return createChildElement(decodePathParam(match[1]), body, reqInfo)
+        }
     }
 
     // /api/elements/:id

@@ -204,9 +204,21 @@ function defaultSerializeChild(elem) {
     if (elem._parent) {
         result._parentId = elem._parent._id
     }
-    // Include common child-specific fields if present
-    if (elem.type !== undefined && typeof elem.type === 'string') {
-        result.type = elem.type
+    // Include common child-specific fields if present.
+    // `type` holds either a plain string or a Model reference; only the string
+    // form used to be reported, so a type set by element id read back as absent.
+    if (elem.type !== undefined && elem.type !== null && elem.type !== '') {
+        if (typeof elem.type === 'string') {
+            result.type = elem.type
+            result.typeName = elem.type
+        } else if (typeof elem.type === 'object') {
+            result.typeId = elem.type._id
+            result.typeName = elem.type.name || ''
+        }
+    }
+    // An operation's return type is the parameter whose direction is 'return'.
+    if (elem.direction !== undefined) {
+        result.direction = elem.direction
     }
     if (elem.defaultValue !== undefined) {
         result.defaultValue = elem.defaultValue
@@ -588,6 +600,15 @@ function makeListResource(config, res) {
         listTypes.forEach(function (t) {
             const found = app.repository.select('@' + t)
             found.forEach(function (e) {
+                // select('@Type') matches the whole inheritance chain, so it also hands
+                // back subtypes: @UMLComponent returns UMLSubsystem and UMLUseCaseSubject,
+                // @UMLClass returns UMLStereotype, @UMLDataType returns UMLEnumeration.
+                // makeGetResource/makeUpdateResource/makeDeleteResource already match on
+                // constructor.name against this same list, so listing stayed the odd one
+                // out. Drop anything whose exact type was not asked for.
+                if (listTypes.indexOf(e.constructor.name) === -1) {
+                    return
+                }
                 if (!seenIds[e._id]) {
                     seenIds[e._id] = true
                     elements.push(e)
@@ -1162,7 +1183,12 @@ function makeUpdateChild(config, res, child) {
 function makeListRelation(config, rel) {
     const listType = rel.modelType || rel.type
     return function (params, query, body, reqInfo) {
-        const elements = app.repository.select('@' + listType)
+        // Same inheritance-chain leak as makeListResource: @UMLDependency also returns
+        // UMLAbstraction, UMLRealization, UMLInterfaceRealization and
+        // UMLComponentRealization, all of which have their own endpoints. Match exactly.
+        const elements = app.repository.select('@' + listType).filter(function (e) {
+            return e.constructor.name === listType
+        })
 
         let filtered = elements
         // Filter by diagramId if provided
