@@ -21,7 +21,8 @@ set -uo pipefail
 BASE="http://localhost:${PORT:-12345}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="${REPO:-$(cd "$HERE/.." && pwd)}"
-WORK_MDJ="/tmp/staruml_itest_work_$$.mdj"
+PRE_MDJ="/tmp/staruml_itest_pre_$$.mdj"    # copy of the original, taken before anything changes
+WORK_MDJ="/tmp/staruml_itest_work_$$.mdj"  # where the scratch project is parked before reopening
 
 api() {
     local method="$1" path="$2" data="${3:-}"
@@ -69,27 +70,51 @@ restore() {
     # Save whatever is open now, so reopening cannot raise an unsaved-changes
     # dialog — a modal would freeze the extension and every later request.
     api POST /api/project/save "{\"path\":\"$WORK_MDJ\"}" > /dev/null 2>&1
-    if [ -n "$ORIGINAL" ]; then
-        local out
-        out="$(api POST /api/project/open "{\"path\":\"$ORIGINAL\"}")"
-        local ok
-        ok="$(printf '%s' "$out" | jq_get "d.get('success')")"
-        if [ "$ok" = "True" ]; then
-            echo "   reopened: $ORIGINAL"
-        else
-            echo "   WARNING: could not reopen $ORIGINAL"
-            echo "   $out"
-            echo "   The working copy is at $WORK_MDJ — do not overwrite the original from StarUML."
-            return $code
-        fi
+    if [ -z "$ORIGINAL" ]; then
+        # Nothing to reopen. StarUML is still holding WORK_MDJ, so deleting it
+        # would leave the app pointed at a file that no longer exists — the same
+        # hole this script exists to avoid.
+        echo "   no original to reopen; StarUML still has $WORK_MDJ open (left in place)"
+        echo "   done (exit $code)"
+        return $code
     fi
+
+    local out ok
+    out="$(api POST /api/project/open "{\"path\":\"$ORIGINAL\"}")"
+    ok="$(printf '%s' "$out" | jq_get "d.get('success')")"
+    if [ "$ok" != "True" ]; then
+        echo "   WARNING: could not reopen $ORIGINAL"
+        echo "   $out"
+        echo "   StarUML still has $WORK_MDJ open. A copy of the original as it was"
+        echo "   before this run is at $PRE_MDJ. Neither is deleted."
+        return $code
+    fi
+
+    echo "   reopened: $ORIGINAL"
+    # Safe now: StarUML has the original open, so neither temp file is in use.
     rm -f "$WORK_MDJ"
+    echo "   pre-run copy kept at $PRE_MDJ"
     echo "   done (exit $code)"
     return $code
 }
 trap restore EXIT
 
 echo "== 3. Switching to an empty project =="
+# project:new runs StarUML's handleNew, whose first act is
+#   if (app.repository.isModified()) showSaveConfirmDialog(...)
+# That dialog is modal: it blocks the drawing thread and with it the HTTP
+# server, so this request would never return and neither would the EXIT trap's.
+# Saving first clears the modified flag, so the dialog cannot appear.
+echo "   saving the open project to $PRE_MDJ first (clears the modified flag)"
+echo "   NOTE: unsaved changes in the original go into that copy, not back into"
+echo "         the original file. The original on disk is left untouched."
+SAVED="$(api POST /api/project/save "{\"path\":\"$PRE_MDJ\"}")"
+if [ "$(printf '%s' "$SAVED" | jq_get "d.get('success')")" != "True" ]; then
+    echo "ABORT: could not park the open project; refusing to risk a modal dialog."
+    echo "$SAVED"
+    exit 1
+fi
+
 NEW="$(api POST /api/project/new '{}')"
 if [ "$(printf '%s' "$NEW" | jq_get "d.get('success')")" != "True" ]; then
     echo "ABORT: could not create a new project:"

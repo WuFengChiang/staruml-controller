@@ -76,10 +76,17 @@ def need(label, res, key="data"):
 
 
 print("=== Gap 6: status reports the manifest version ===")
+# Read the expected version from the manifest rather than hardcoding it, so a
+# version bump does not turn this check into a false failure.
+import os
+_manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "package.json")
+with open(_manifest) as fh:
+    EXPECTED_VERSION = json.load(fh)["version"]
+
 st = api("GET", "/api/status")
 check("status answers", st.get("success"), st.get("error"))
-check("version is 1.1.2, not the old hardcoded 1.0.0",
-      st.get("data", {}).get("version") == "1.1.2", st.get("data", {}).get("version"))
+check("version matches package.json (%s), not the old hardcoded 1.0.0" % EXPECTED_VERSION,
+      st.get("data", {}).get("version") == EXPECTED_VERSION, st.get("data", {}).get("version"))
 
 print("\n=== Setting up a scratch class diagram ===")
 d = need("create class diagram", api("POST", "/api/class/diagrams", {"name": "GapCheck"}))
