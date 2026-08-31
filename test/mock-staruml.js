@@ -113,6 +113,23 @@ class UMLDirectedRelationship extends UMLRelationship {
         this.target = null
     }
 }
+class UMLAssociationEnd extends UMLAttribute {
+    constructor() {
+        super()
+        this.reference = null
+        this.navigable = true
+        this.aggregation = 'none'
+        this.multiplicity = ''
+    }
+}
+class UMLUndirectedRelationship extends UMLRelationship {
+    constructor() {
+        super()
+        this.end1 = null
+        this.end2 = null
+    }
+}
+class UMLAssociation extends UMLUndirectedRelationship {}
 class UMLDependency extends UMLDirectedRelationship {}
 class UMLAbstraction extends UMLDependency {}
 class UMLRealization extends UMLAbstraction {}
@@ -181,7 +198,8 @@ const type = {
     UMLRelationship, UMLDirectedRelationship, UMLDependency, UMLAbstraction,
     UMLRealization, UMLInterfaceRealization, UMLComponentRealization,
     UMLGeneralization, Hyperlink, Tag, UMLSequenceDiagram, UMLClassDiagram,
-    Point, UMLSeqMessageView
+    Point, UMLSeqMessageView,
+    UMLUndirectedRelationship, UMLAssociation, UMLAssociationEnd
 }
 type.UMLModel = UMLModel_
 

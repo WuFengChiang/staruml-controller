@@ -175,7 +175,11 @@ function defaultSerializeRelation(elem, config) {
 
 function serializeEnd(end, endFields) {
     if (!end) return null
-    const result = {}
+    // The end's own id: PUT /api/elements/:id accepts an association end, but
+    // no endpoint used to hand out its id, so callers had to parse the .mdj to
+    // find one. `reference` below is a different thing — the classifier this
+    // end attaches to.
+    const result = { _id: end._id, _type: end.constructor.name }
     if (end.reference) {
         result.reference = end.reference._id
     }

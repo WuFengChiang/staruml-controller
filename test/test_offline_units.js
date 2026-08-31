@@ -283,6 +283,30 @@ console.log('\n=== documentation on an operation (peer reported this as impossib
 r = api.route('PUT', '/api/elements/' + op._id, { documentation: 'Places an order.' })
 check('operation documentation is writable', r.success && r.data.documentation === 'Places an order.', r.error || r.data)
 
+console.log('\n=== An association end can be found by id ===')
+
+// PUT /api/elements/:id accepts an association end, but nothing used to hand
+// out its id, so callers had to parse the .mdj file to get one.
+const assoc = mock.register(new t.UMLAssociation(), 'orders', cls)
+assoc.end1 = mock.register(new t.UMLAssociationEnd(), 'customer', assoc)
+assoc.end2 = mock.register(new t.UMLAssociationEnd(), 'order', assoc)
+assoc.end1.reference = cls
+assoc.end2.reference = dataType
+
+r = api.route('GET', '/api/class/associations')
+check('associations list includes the association', r.success && r.data.length === 1, r.error || r.data)
+check('each end carries its own _id',
+    r.success && r.data[0].end1._id === assoc.end1._id && r.data[0].end2._id === assoc.end2._id,
+    r.success && r.data[0])
+check('the end _id is not the classifier it references',
+    r.success && r.data[0].end1._id !== r.data[0].end1.reference,
+    r.success && r.data[0].end1)
+
+const endId = r.success ? r.data[0].end1._id : null
+r = api.route('PUT', '/api/elements/' + endId, { documentation: 'The buying party.' })
+check('that id round-trips into a documentation write',
+    r.success && r.data.documentation === 'The buying party.', r.error || r.data)
+
 console.log('\n=== Every list endpoint still answers ===')
 
 // The exact-type filter lives in crud-factory, which builds the routes for all
