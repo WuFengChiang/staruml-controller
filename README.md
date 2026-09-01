@@ -135,6 +135,128 @@ the write was refused:
 A clean write returns exactly what it always did — no new fields, and a message in
 the original shape.
 
+## Setting an Element's Type
+
+An attribute's type, a parameter's type, and the classifier a lifeline stands for
+are the same thing underneath: a `type` property holding either a reference to a
+classifier or a plain string. Two fields write it wherever it exists.
+
+| Field | Takes | Stores |
+|---|---|---|
+| `typeId` | an element id, or `null` to clear it | a reference to that classifier |
+| `typeName` | a bare type name | the string as given |
+
+The two are mutually exclusive. `typeId` is refused unless it names a
+UMLClassifier, and both are refused on an element with no type property at all,
+so a write is never reported as successful when the engine would discard it.
+
+`PUT /api/elements/:id` takes them for any structural feature, and
+`POST /api/elements/:id/children` takes them while creating one — which is what
+makes an existing attribute's type changeable at all. Before, the only way to
+change it was to delete the attribute and build a replacement.
+
+Of the child types this API creates, these are structural features and accept a
+type: UMLAttribute, UMLParameter, UMLPort, UMLInputPin, UMLOutputPin,
+SysMLProperty and SysMLFlowProperty. UMLSlot is not one and has no type property,
+so it is refused with a message that says so rather than reporting a write that
+went nowhere.
+
+An operation's return type is a parameter whose `direction` is `return`, so it
+takes one call:
+
+```bash
+curl -X POST "http://localhost:12345/api/elements/$OP_ID/children" \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"UMLParameter","name":"result","direction":"return","typeId":"'"$CLASS_ID"'"}'
+```
+
+Two classes carry a `direction`, and they do not accept the same values.
+UMLParameter takes `in`, `inout`, `out` or `return`. SysMLFlowProperty takes
+`in`, `out` or `inout` — there is no `return` on a flow property. Each is checked
+against its own list, so `return` on a flow property is refused rather than
+written and dropped by the engine.
+
+Read the parameters back with `GET /api/elements/:id/children?field=parameters`.
+Name the field you wrote to: without `field` the call walks a fixed set of
+container fields (attributes, operations, parameters, literals, ports and the
+rest), and that is not the same set `POST .../children` can write into — POST
+accepts any `field`. Reading accepts any field the parent actually carries as a
+collection, `ownedElements` included; a field it does not carry is still an
+error, so a typo reports itself instead of coming back empty.
+
+A lifeline puts the same idea one level further down. `UMLLifeline.represent`
+holds a role, and the classifier sits on that role's type, which is why
+`representTypeId` and `representTypeName` on `/api/seq/lifelines/:id` reach
+through the role rather than naming it. Setting `representTypeId` to a class is
+what makes a lifeline read `ui : OrderService`.
+
+A lifeline with no role cannot take a type at all. That is checked before
+anything is written, so a rejected update leaves the lifeline exactly as it was —
+earlier it applied the name first and reported the failure afterwards, and the
+name really had changed.
+
+## Placing a New Element
+
+Every create-on-a-diagram endpoint takes `x1`, `y1`, `x2`, `y2`. `x1`/`y1` are the
+top-left corner and `x2`/`y2` the bottom-right, and you can send just the corner:
+`x2`/`y2` then default to a size measured from it, so the element lands where you
+put it.
+
+Until this was fixed, `x2`/`y2` defaulted to fixed coordinates instead. Sending
+`x1: 680, y1: 420` with no `x2`/`y2` produced the rectangle (680,420)-(200,180),
+which StarUML normalises to `left: 200, top: 180, width: 480, height: 240` — the
+element sat at (200,180) and was 480 wide. Anything placed past the default
+corner stacked in that one spot, and nothing in the response showed it. Sending
+all four coordinates always worked, and still behaves exactly as before.
+
+## What a List Endpoint Returns
+
+`GET /api/{family}/{resource}` returns elements of exactly the declared type.
+
+It used to return subtypes as well, because StarUML's `select('@Type')` matches
+the whole inheritance chain. So `component/components` also handed back every
+UMLSubsystem and UMLUseCaseSubject in the model, and `class/dependencies` mixed
+in every realization. Nothing failed — a caller just got a plausible row count
+made of the wrong elements, which is the kind of mistake that only surfaces
+later. Get, update and delete had always matched exactly; only listing differed.
+
+Twenty-four resources changed behaviour — every one whose declared type has a
+subtype in StarUML's metamodel. The `dependencies` endpoints changed most:
+`component`, `composite`, `deployment` and `usecase` each stopped returning
+thirteen kinds of relationship, and `class/dependencies` eleven, because
+UMLAbstraction and SysMLTrace are declared there. `class/classes` stopped
+returning eight, UMLStereotype and the SysML blocks among them.
+
+Most of those subtypes already had a list of their own — UMLStereotype under
+`profile/stereotypes`, UMLEnumeration under `class/enumerations`,
+UMLInterfaceRealization under `class/interface-realizations` — and keeping them
+out of the parent list is the point. Nine did not, in two different ways.
+
+Five this API can create, so it could make something no endpoint would ever
+report: UMLStructuredActivityNode, UMLActivityParameterNode, UMLTimeConstraint
+and UMLDurationConstraint, all in `allowedNodeTypes`, plus SysMLFlowProperty in
+`allowedChildTypes`. A caller cannot tell "I never made it" from "I cannot find
+it", so it makes another one.
+
+The other four have no create route here at all — UMLIntervalConstraint,
+UMLAbstraction, SysMLTrace and SysMLItemFlow arrive from the GUI or an import.
+They were not creatable-and-lost; they were simply invisible to an API being
+asked to read someone else's model.
+
+They are listed again through `modelTypes`, which lets a resource or a relation
+answer for several exact types. `class/dependencies` declares
+`['UMLDependency', 'UMLAbstraction', 'SysMLTrace']`: the two orphans have no
+endpoint of their own, while the realizations keep theirs and stay out.
+`modelTypes` widens listing, get, update and delete only — `type` still decides
+what the endpoint creates.
+
+`test/test_offline_units.js` keeps this honest. It reads every family config plus
+StarUML's inheritance table (`test/metamodel-inheritance.json`, regenerated by
+`test/dump_metamodel_inheritance.py`) and fails if any model type whose ancestor
+is listed has no list of its own. Two types are excluded by name: C4Model, an
+auto-created container, and SysMLAbstractRequirement, an abstract base with no
+view.
+
 ## API Endpoints
 
 ### General
@@ -143,10 +265,10 @@ the original shape.
 |---|---|---|
 | `/api/status` | GET | Health check. Small payload: status, version, and the open project |
 | `/api/status/capabilities` | GET | Allowed type lists and the full endpoint list (~46 KB) |
-| `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element |
+| `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element. PUT takes `name`, `stereotype`, `documentation`, `referenceId`, and for structural features `typeId`/`typeName`/`direction` |
 | `/api/elements/:id/tags` | GET / POST | List or create tags |
 | `/api/tags/:id` | GET / PUT / DELETE | Get, update, or delete tag |
-| `/api/elements/:id/children` | POST | Create child element (attribute, operation, etc.) |
+| `/api/elements/:id/children` | GET / POST | List or create child elements (attribute, operation, parameter, etc.). GET takes `?field=parameters` to list one container |
 | `/api/elements/:id/relationships` | GET | Get all relationships of an element |
 | `/api/elements/:id/views` | GET | Get all views of an element |
 | `/api/elements/:id/relocate` | PUT | Move element to a different parent |
@@ -218,8 +340,8 @@ the original shape.
 | `/api/seq/interactions/:id` | GET / PUT / DELETE | Get, update, or delete interaction |
 | `/api/seq/diagrams` | GET / POST | List or create sequence diagrams |
 | `/api/seq/diagrams/:id` | GET / PUT / DELETE | Get, update, or delete sequence diagram |
-| `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines |
-| `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline |
+| `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines. POST takes `representTypeId`/`representTypeName` to set what the lifeline stands for |
+| `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline. PUT takes `representTypeId` (a classifier's id, or `null` to clear) or `representTypeName` (a bare type name) |
 | `/api/seq/interactions/:id/messages` | GET / POST | List or create messages |
 | `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`; GET and PUT return the view geometry in `data.view` |
 | `/api/seq/interactions/:id/combined-fragments` | GET / POST | List or create combined fragments |
@@ -782,6 +904,19 @@ curl -X POST http://localhost:12345/api/seq/combined-fragments/FRAGMENT_ID/opera
   -d '{"guard": "[success]"}'
 ```
 
+## Tests
+
+```bash
+node test/test_offline_units.js      # no StarUML needed
+bash test/test_all_endpoints.sh      # needs StarUML running with the server started
+```
+
+The offline tests drive the same `route()` entry point against a mock runtime, so
+they can run while someone else has a model open — the integration script writes
+into whatever model is currently open, and there is only ever one. They cover
+routing, validation and serialization; anything about how StarUML's own engine
+behaves (clamping, view geometry, persistence) still needs the integration run.
+
 ## File Structure
 
 ```
@@ -808,7 +943,9 @@ staruml-controller/
 │   ├── image4.jpg     # Tools menu screenshot
 │   └── image5.jpg     # Port number dialog screenshot
 ├── test/
-│   └── test_all_endpoints.sh  # Integration test script
+│   ├── test_all_endpoints.sh  # Integration tests (needs a live StarUML)
+│   ├── test_offline_units.js  # Unit tests against a mock runtime (no StarUML)
+│   └── mock-staruml.js        # Mock StarUML runtime for the unit tests
 ├── package.json       # Extension metadata
 └── README.md
 ```

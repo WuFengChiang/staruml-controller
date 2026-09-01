@@ -6,6 +6,13 @@ module.exports = {
         { name: 'info-items', types: ['UMLInformationItem'] }
     ],
     relations: [
-        { name: 'information-flows', type: 'UMLInformationFlow' }
+        // SysMLItemFlow extends UMLInformationFlow and no endpoint declares it, so
+        // exact-type matching left it unreachable. `type` is still what this
+        // endpoint creates; `modelTypes` only widens what it will list and address.
+        {
+            name: 'information-flows',
+            type: 'UMLInformationFlow',
+            modelTypes: ['UMLInformationFlow', 'SysMLItemFlow']
+        }
     ]
 }

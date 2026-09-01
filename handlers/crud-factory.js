@@ -175,7 +175,11 @@ function defaultSerializeRelation(elem, config) {
 
 function serializeEnd(end, endFields) {
     if (!end) return null
-    const result = {}
+    // The end's own id: PUT /api/elements/:id accepts an association end, but
+    // no endpoint used to hand out its id, so callers had to parse the .mdj to
+    // find one. `reference` below is a different thing — the classifier this
+    // end attaches to.
+    const result = { _id: end._id, _type: end.constructor.name }
     if (end.reference) {
         result.reference = end.reference._id
     }
@@ -204,9 +208,21 @@ function defaultSerializeChild(elem) {
     if (elem._parent) {
         result._parentId = elem._parent._id
     }
-    // Include common child-specific fields if present
-    if (elem.type !== undefined && typeof elem.type === 'string') {
-        result.type = elem.type
+    // Include common child-specific fields if present.
+    // `type` holds either a plain string or a Model reference; only the string
+    // form used to be reported, so a type set by element id read back as absent.
+    if (elem.type !== undefined && elem.type !== null && elem.type !== '') {
+        if (typeof elem.type === 'string') {
+            result.type = elem.type
+            result.typeName = elem.type
+        } else if (typeof elem.type === 'object') {
+            result.typeId = elem.type._id
+            result.typeName = elem.type.name || ''
+        }
+    }
+    // An operation's return type is the parameter whose direction is 'return'.
+    if (elem.direction !== undefined) {
+        result.direction = elem.direction
     }
     if (elem.defaultValue !== undefined) {
         result.defaultValue = elem.defaultValue
@@ -348,7 +364,7 @@ function createFamilyHandlers(config) {
             // makeListChildren/makeCreateChild only read `name` and `types` off the
             // parent config, so a resource-shaped view of the relation reuses them as-is.
             if (rel.children) {
-                const relAsResource = { name: rel.name, types: [rel.modelType || rel.type] }
+                const relAsResource = { name: rel.name, types: relationTypes(rel) }
                 rel.children.forEach(function (child) {
                     routes.push({
                         method: 'GET',
@@ -588,6 +604,15 @@ function makeListResource(config, res) {
         listTypes.forEach(function (t) {
             const found = app.repository.select('@' + t)
             found.forEach(function (e) {
+                // select('@Type') matches the whole inheritance chain, so it also hands
+                // back subtypes: @UMLComponent returns UMLSubsystem and UMLUseCaseSubject,
+                // @UMLClass returns UMLStereotype, @UMLDataType returns UMLEnumeration.
+                // makeGetResource/makeUpdateResource/makeDeleteResource already match on
+                // constructor.name against this same list, so listing stayed the odd one
+                // out. Drop anything whose exact type was not asked for.
+                if (listTypes.indexOf(e.constructor.name) === -1) {
+                    return
+                }
                 if (!seenIds[e._id]) {
                     seenIds[e._id] = true
                     elements.push(e)
@@ -708,10 +733,15 @@ function makeCreateResource(config, res) {
             }
         }
 
+        // x2/y2 default to a size measured from x1/y1, not to fixed coordinates.
+        // Absolute defaults inverted the rectangle whenever x1/y1 exceeded them:
+        // x1=680,y1=420 with no x2/y2 gave (680,420)-(200,180), which StarUML
+        // normalises to left=200,top=180 — so every element placed past (200,180)
+        // silently stacked in the same spot.
         const x1 = body.x1 !== undefined ? body.x1 : 100
         const y1 = body.y1 !== undefined ? body.y1 : 100
-        const x2 = body.x2 !== undefined ? body.x2 : 200
-        const y2 = body.y2 !== undefined ? body.y2 : 180
+        const x2 = body.x2 !== undefined ? body.x2 : x1 + 100
+        const y2 = body.y2 !== undefined ? body.y2 : y1 + 80
 
         const factoryOpts = {
             id: factoryId,
@@ -1159,10 +1189,34 @@ function makeUpdateChild(config, res, child) {
 // Relation handlers
 // ============================================================
 
+// The exact types a relation endpoint answers for.
+//
+// `type` is what the endpoint creates. `modelTypes` widens what it will match,
+// for subtypes that have no endpoint of their own: matching on the exact name
+// alone would leave them unreachable, because nothing else lists them. Subtypes
+// that do have their own endpoint (UMLRealization -> class/realizations) are
+// deliberately left out — keeping them out of the parent list is the point.
+function relationTypes(rel) {
+    return rel.modelTypes || [rel.modelType || rel.type]
+}
+
 function makeListRelation(config, rel) {
-    const listType = rel.modelType || rel.type
+    const listTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
-        const elements = app.repository.select('@' + listType)
+        // Same inheritance-chain leak as makeListResource: @UMLDependency also hands
+        // back UMLAbstraction, UMLRealization, UMLInterfaceRealization and
+        // UMLComponentRealization. Match exactly, against every type this endpoint
+        // is responsible for.
+        const seen = {}
+        const elements = []
+        listTypes.forEach(function (t) {
+            app.repository.select('@' + t).forEach(function (e) {
+                if (listTypes.indexOf(e.constructor.name) === -1) return
+                if (seen[e._id]) return
+                seen[e._id] = true
+                elements.push(e)
+            })
+        })
 
         let filtered = elements
         // Filter by diagramId if provided
@@ -1373,10 +1427,10 @@ function applyEndFields(end, values, endFields, report, endName) {
 }
 
 function makeGetRelation(config, rel) {
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: reqInfo }
         }
         const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
@@ -1393,7 +1447,7 @@ function makeUpdateRelation(config, rel) {
     const updateFields = rel.updateFields || ['name', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
     const fieldNames = fieldDefs.map(function (d) { return d.name })
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     // Add end1/end2 if applicable
     const allFieldNames = fieldNames.slice()
     if (rel.hasEnds) {
@@ -1417,7 +1471,7 @@ function makeUpdateRelation(config, rel) {
         }
 
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
@@ -1463,10 +1517,10 @@ function makeUpdateRelation(config, rel) {
 }
 
 function makeDeleteRelation(config, rel) {
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: reqInfo }
         }
 
