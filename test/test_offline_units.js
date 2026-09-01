@@ -307,6 +307,111 @@ r = api.route('PUT', '/api/elements/' + endId, { documentation: 'The buying part
 check('that id round-trips into a documentation write',
     r.success && r.data.documentation === 'The buying party.', r.error || r.data)
 
+console.log('\n=== No model type lost its only list endpoint ===')
+
+// Listing now matches exact type names. That is the point of the subtype fix, but
+// it has a cost: a subtype whose only home was an ancestor's list disappears
+// unless some resource declares it by name. The API could then create something
+// no endpoint would ever report — the caller cannot tell "I never made it" from
+// "I cannot find it", so it makes another one.
+//
+// Read the declarations out of the family configs and the inheritance out of
+// StarUML's own metamodel (dumped by test/dump_metamodel_inheritance.py), and
+// require that every model type with a listed ancestor is itself listed.
+const fs = require('fs')
+const INHERITS = require('./metamodel-inheritance.json')
+
+// Two types are left out on purpose:
+//   C4Model                  auto-created container (AUTO_CONTAINER_TYPES); it is
+//                            not an element of a diagram and never was meant to
+//                            appear under c4/elements.
+//   SysMLAbstractRequirement abstract base with no "view" in the metamodel, so
+//                            nothing instantiates it; SysMLRequirement is the
+//                            concrete one.
+const NOT_LISTABLE = ['C4Model', 'SysMLAbstractRequirement']
+
+const declaredBy = {}
+fs.readdirSync(path.join(__dirname, '..', 'handlers'))
+    .filter(function (f) { return /^family-.*\.js$/.test(f) })
+    .forEach(function (f) {
+        const cfg = require(path.join(__dirname, '..', 'handlers', f))
+        function note(name, where) {
+            if (!name) return
+            if (!declaredBy[name]) declaredBy[name] = []
+            declaredBy[name].push(where)
+        }
+        ;(cfg.diagrams && cfg.diagrams.types || []).forEach(function (x) { note(x, cfg.prefix + '/diagrams') })
+        ;(cfg.resources || []).forEach(function (res) {
+            ;(res.modelTypes || res.types || []).forEach(function (x) { note(x, cfg.prefix + '/' + res.name) })
+            ;(res.children || []).forEach(function (c) {
+                ;(c.modelTypes || c.types || []).forEach(function (x) { note(x, cfg.prefix + '/' + res.name + '/' + c.name) })
+            })
+        })
+        ;(cfg.relations || []).forEach(function (rel) {
+            ;(rel.modelTypes || [rel.modelType || rel.type]).forEach(function (x) { note(x, cfg.prefix + '/' + rel.name) })
+        })
+    })
+
+function ancestry(name) {
+    const out = []
+    let cur = name
+    while (cur) {
+        out.push(cur)
+        cur = INHERITS[cur]
+    }
+    return out
+}
+
+const orphans = []
+Object.keys(INHERITS).forEach(function (name) {
+    if (declaredBy[name] || NOT_LISTABLE.indexOf(name) !== -1) return
+    const line = ancestry(name)
+    // Views and diagrams are not what these endpoints list.
+    if (line.indexOf('Model') === -1 || /View$/.test(name) || line.indexOf('Diagram') !== -1) return
+    const listedAncestor = line.slice(1).filter(function (a) { return declaredBy[a] })[0]
+    if (listedAncestor) {
+        orphans.push(name + ' (was reachable via ' + listedAncestor + ')')
+    }
+})
+
+check('every subtype of a listed type is listed somewhere itself',
+    orphans.length === 0, orphans)
+
+// The four the review named, and the one the sweep added, pinned by name so a
+// later edit to a family config cannot quietly drop them again.
+;[['UMLStructuredActivityNode', 'activity/actions'],
+  ['UMLActivityParameterNode', 'activity/object-nodes'],
+  ['UMLTimeConstraint', 'timing/timing-states'],
+  ['UMLDurationConstraint', 'timing/timing-states'],
+  ['SysMLFlowProperty', 'sysml/parts'],
+  ['UMLAbstraction', 'class/dependencies'],
+  ['SysMLTrace', 'class/dependencies'],
+  ['SysMLItemFlow', 'infoflow/information-flows']].forEach(function (pair) {
+    check(pair[0] + ' is listed by ' + pair[1],
+        (declaredBy[pair[0]] || []).indexOf(pair[1]) !== -1, declaredBy[pair[0]])
+})
+
+// A relation endpoint that widened its match must still answer get/update/delete
+// for the widened types, or the id it just listed leads nowhere.
+const abstraction = mock.register(new t.UMLAbstraction(), 'abstr1')
+r = api.route('GET', '/api/class/dependencies')
+check('class/dependencies lists a UMLAbstraction',
+    r.success && r.data.some(function (d) { return d._id === abstraction._id }),
+    r.data && r.data.map(function (d) { return d._type }))
+
+r = api.route('GET', '/api/class/dependencies/' + abstraction._id)
+check('and GET on that id answers instead of "not found"', r.success, r.error)
+
+r = api.route('PUT', '/api/class/dependencies/' + abstraction._id, { documentation: 'widened' })
+check('and PUT on that id writes', r.success && r.data.documentation === 'widened', r.error || r.data)
+
+// Subtypes that DO have their own endpoint must stay out of the parent list —
+// that separation is what the original fix was for.
+r = api.route('GET', '/api/class/dependencies')
+check('but realizations still stay out of the dependency list',
+    r.success && !r.data.some(function (d) { return d._type.indexOf('Realization') !== -1 }),
+    r.data && r.data.map(function (d) { return d._type }))
+
 console.log('\n=== Every list endpoint still answers ===')
 
 // The exact-type filter lives in crud-factory, which builds the routes for all

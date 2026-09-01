@@ -364,7 +364,7 @@ function createFamilyHandlers(config) {
             // makeListChildren/makeCreateChild only read `name` and `types` off the
             // parent config, so a resource-shaped view of the relation reuses them as-is.
             if (rel.children) {
-                const relAsResource = { name: rel.name, types: [rel.modelType || rel.type] }
+                const relAsResource = { name: rel.name, types: relationTypes(rel) }
                 rel.children.forEach(function (child) {
                     routes.push({
                         method: 'GET',
@@ -1189,14 +1189,33 @@ function makeUpdateChild(config, res, child) {
 // Relation handlers
 // ============================================================
 
+// The exact types a relation endpoint answers for.
+//
+// `type` is what the endpoint creates. `modelTypes` widens what it will match,
+// for subtypes that have no endpoint of their own: matching on the exact name
+// alone would leave them unreachable, because nothing else lists them. Subtypes
+// that do have their own endpoint (UMLRealization -> class/realizations) are
+// deliberately left out — keeping them out of the parent list is the point.
+function relationTypes(rel) {
+    return rel.modelTypes || [rel.modelType || rel.type]
+}
+
 function makeListRelation(config, rel) {
-    const listType = rel.modelType || rel.type
+    const listTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
-        // Same inheritance-chain leak as makeListResource: @UMLDependency also returns
-        // UMLAbstraction, UMLRealization, UMLInterfaceRealization and
-        // UMLComponentRealization, all of which have their own endpoints. Match exactly.
-        const elements = app.repository.select('@' + listType).filter(function (e) {
-            return e.constructor.name === listType
+        // Same inheritance-chain leak as makeListResource: @UMLDependency also hands
+        // back UMLAbstraction, UMLRealization, UMLInterfaceRealization and
+        // UMLComponentRealization. Match exactly, against every type this endpoint
+        // is responsible for.
+        const seen = {}
+        const elements = []
+        listTypes.forEach(function (t) {
+            app.repository.select('@' + t).forEach(function (e) {
+                if (listTypes.indexOf(e.constructor.name) === -1) return
+                if (seen[e._id]) return
+                seen[e._id] = true
+                elements.push(e)
+            })
         })
 
         let filtered = elements
@@ -1408,10 +1427,10 @@ function applyEndFields(end, values, endFields, report, endName) {
 }
 
 function makeGetRelation(config, rel) {
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: reqInfo }
         }
         const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
@@ -1428,7 +1447,7 @@ function makeUpdateRelation(config, rel) {
     const updateFields = rel.updateFields || ['name', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
     const fieldNames = fieldDefs.map(function (d) { return d.name })
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     // Add end1/end2 if applicable
     const allFieldNames = fieldNames.slice()
     if (rel.hasEnds) {
@@ -1452,7 +1471,7 @@ function makeUpdateRelation(config, rel) {
         }
 
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
@@ -1498,10 +1517,10 @@ function makeUpdateRelation(config, rel) {
 }
 
 function makeDeleteRelation(config, rel) {
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: reqInfo }
         }
 

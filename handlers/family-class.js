@@ -71,7 +71,15 @@ module.exports = {
             endFields: ['name', 'navigable', 'aggregation', 'multiplicity']
         },
         { name: 'generalizations', type: 'UMLGeneralization' },
-        { name: 'dependencies', type: 'UMLDependency' },
+        // UMLAbstraction and SysMLTrace descend from UMLDependency and have no
+        // endpoint of their own, so exact-type matching left them unreachable.
+        // UMLRealization and friends are deliberately absent: they have their own
+        // endpoints, and keeping them out of this list is the point of the fix.
+        {
+            name: 'dependencies',
+            type: 'UMLDependency',
+            modelTypes: ['UMLDependency', 'UMLAbstraction', 'SysMLTrace']
+        },
         { name: 'interface-realizations', type: 'UMLInterfaceRealization' },
         { name: 'realizations', type: 'UMLRealization' },
         { name: 'template-bindings', type: 'UMLTemplateBinding' }
