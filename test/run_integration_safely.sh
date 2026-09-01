@@ -46,14 +46,27 @@ ORIGINAL="$(printf '%s' "$STATUS" | jq_get "d['data'].get('project',{}).get('fil
 echo "   current project: ${ORIGINAL:-<none>}"
 
 echo "== 2. Is the build under test loaded? =="
-# GET /api/elements/:id/children exists only in the build being tested. On an
-# older build the router falls through and reports the route itself as missing.
-PROBE="$(api GET /api/elements/probe-not-a-real-id/children | jq_get "d.get('error','')")"
+# Ask for a child field the parent cannot have, on an id that does not exist.
+# Each build answers differently, so one request tells all three apart:
+#   this build   the unknown-field check moved after the parent lookup, so the
+#                missing parent is reported first
+#   previous     the field was checked against a fixed whitelist before anything
+#                else, so it complains about the field
+#   older still  the route did not exist and the router falls through
+#
+# Do not use /api/status for this. The version there comes from package.json, and
+# package.json only changes when someone bumps it — editing handlers moves no
+# version number at all.
+PROBE="$(api GET "/api/elements/probe-not-a-real-id/children?field=ownedElements" | jq_get "d.get('error','')")"
 case "$PROBE" in
-    *"Parent element not found"*) echo "   new build loaded." ;;
+    *"Parent element not found"*) echo "   build under test is loaded." ;;
+    *"Unknown child field"*)
+        echo "ABORT: StarUML is running the previous build (subtype fixes only)."
+        echo "       Quit StarUML (Cmd+Q), reopen it, start the server, then rerun."
+        exit 1 ;;
     *"Not found: GET"*)
-        echo "ABORT: StarUML is still running the previous build."
-        echo "       Reload the extension (Debug > Reload), restart the server, then rerun."
+        echo "ABORT: StarUML is running a build older than both."
+        echo "       Quit StarUML (Cmd+Q), reopen it, start the server, then rerun."
         exit 1 ;;
     *) echo "ABORT: unexpected probe response: $PROBE"; exit 1 ;;
 esac
