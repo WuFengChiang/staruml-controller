@@ -502,5 +502,48 @@ listRoutes.forEach(function (path) {
 check(listRoutes.length + ' collection GET routes all answer successfully',
     broken.length === 0, broken.slice(0, 8))
 
+console.log('\n=== No list endpoint hands back a raw StarUML element ===')
+
+// A serializer that passes an element straight through drags the model tree into
+// the response behind it, and `_parent` closes the loop — JSON.stringify throws,
+// or in the live server the request simply never returns. It stayed hidden while
+// nothing could set an attribute's type to a real classifier; now that typeId
+// writes work, any such serializer is one modelled attribute away from hanging.
+//
+// Every serializer reports parents as `_parentId`, so a raw `_parent` anywhere in
+// a response means an element went out whole.
+attr.type = dataType
+
+const leaks = []
+listRoutes.forEach(function (p) {
+    const url = p === '/api/search' ? '/api/search?keyword=probe' : p
+    let res
+    try {
+        res = api.route('GET', url)
+    } catch (e) {
+        leaks.push(p + ' threw ' + (e.message || e))
+        return
+    }
+    let text
+    try {
+        text = JSON.stringify(res)
+    } catch (e) {
+        leaks.push(p + ' cannot be serialised: ' + (e.message || e))
+        return
+    }
+    if (text.indexOf('"_parent"') !== -1) {
+        leaks.push(p + ' embeds a raw element')
+    }
+})
+check('no list endpoint embeds a raw element', leaks.length === 0, leaks.slice(0, 6))
+
+r = api.route('GET', '/api/class/classes')
+const withAttr = r.success && r.data.filter(function (c) { return c._id === cls._id })[0]
+check('a classifier-typed attribute reports typeId and a name, not the element',
+    withAttr && withAttr.attributes.some(function (a) {
+        return a.typeId === dataType._id && a.typeName === 'Money' && a.type === 'Money'
+    }),
+    withAttr && withAttr.attributes)
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)

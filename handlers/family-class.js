@@ -31,7 +31,23 @@ module.exports = {
                 if (elem.isLeaf) result.isLeaf = true
                 if (elem.isActive) result.isActive = true
                 result.attributes = (elem.attributes || []).map(function (a) {
-                    return { _id: a._id, name: a.name || '', type: a.type || '', visibility: a.visibility, isStatic: a.isStatic || false }
+                    // `type` holds either a plain string or a reference to a
+                    // classifier. Passing the reference straight through put the
+                    // whole element into the response, and with it `_parent` — a
+                    // cycle JSON.stringify cannot take, which hung every call to
+                    // this endpoint as soon as one attribute pointed at a class.
+                    // Report both shapes the way serializeElement does, and keep
+                    // `type` a string so existing callers still read a name.
+                    const out = { _id: a._id, name: a.name || '', type: '', visibility: a.visibility, isStatic: a.isStatic || false }
+                    if (a.type && typeof a.type === 'object') {
+                        out.type = a.type.name || ''
+                        out.typeId = a.type._id
+                        out.typeName = a.type.name || ''
+                    } else if (a.type) {
+                        out.type = a.type
+                        out.typeName = a.type
+                    }
+                    return out
                 })
                 result.operations = (elem.operations || []).map(function (o) {
                     return { _id: o._id, name: o.name || '', visibility: o.visibility, isStatic: o.isStatic || false }
