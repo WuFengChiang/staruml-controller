@@ -311,9 +311,30 @@ const DIAGRAM_AS_PARENT_TYPES = ['SysMLConstraintParameter']
 // `type` here is the element class to create (e.g. 'UMLParameter'). The type a
 // structural feature *has* is a separate concept and goes in typeId/typeName.
 const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field', 'typeId', 'typeName', 'direction']
-// UMLParameter.DK_IN / DK_INOUT / DK_OUT / DK_RETURN. An operation's return type
-// is a parameter with direction 'return'.
-const VALID_PARAMETER_DIRECTIONS = ['in', 'inout', 'out', 'return']
+// Which classes carry a `direction`, and what each one accepts. Both lists come
+// from StarUML's metamodel, and they are NOT the same set: UMLParameter uses
+// UMLDirectionKind ("in", "inout", "out", "return") while SysMLFlowProperty uses
+// SysMLFlowDirectionKind ("in", "out", "inout"). `return` is meaningless on a
+// flow property. One shared list would have to either refuse a legal value or
+// admit one the engine rejects, so each class gets its own domain.
+// Nothing else in the metamodel declares a model-level `direction`; LabelView
+// has one, but it is a transient view integer, not a property this API writes.
+const DIRECTION_DOMAINS = {
+    // UMLParameter.DK_IN / DK_INOUT / DK_OUT / DK_RETURN. An operation's return
+    // type is a parameter with direction 'return'.
+    UMLParameter: ['in', 'inout', 'out', 'return'],
+    // SysMLFlowProperty.FD_IN / FD_OUT / FD_INOUT, default 'inout'.
+    SysMLFlowProperty: ['in', 'out', 'inout']
+}
+// Every value some class accepts. Used only to reject nonsense early, before the
+// element's class is known; checkFeatureFieldsSupported then checks the value
+// against the domain of the class actually being written.
+const ALL_DIRECTION_VALUES = Object.keys(DIRECTION_DOMAINS).reduce(function (acc, k) {
+    DIRECTION_DOMAINS[k].forEach(function (v) {
+        if (acc.indexOf(v) === -1) acc.push(v)
+    })
+    return acc
+}, [])
 // Every container field POST /api/elements/:id/children can create into, so the
 // matching GET can read the same children back without being told where to look.
 const CHILD_CONTAINER_FIELDS = (function () {
@@ -2588,18 +2609,34 @@ function resolveRepresentType(body) {
 }
 
 /**
+ * Can this lifeline take a represent type at all?
+ *
+ * Call this before writing anything. applyRepresentType reports the same problem,
+ * but by the time it runs an update has already applied name/stereotype/
+ * documentation — so the caller would read a failure for a write that partly
+ * happened, and the name really did change. Returns an error string, or null.
+ */
+function checkRepresentRole(lifeline, resolved) {
+    if (resolved.skip || lifeline.represent) {
+        return null
+    }
+    return 'Lifeline "' + (lifeline.name || lifeline._id) + '" has no represent role, so its type cannot be set'
+}
+
+/**
  * Write a resolved represent type onto the lifeline's role.
- * Returns an error string only when the lifeline carries no role at all.
+ * Returns an error string only when the lifeline carries no role at all; callers
+ * should have ruled that out with checkRepresentRole before writing anything.
  */
 function applyRepresentType(report, lifeline, resolved) {
+    const roleErr = checkRepresentRole(lifeline, resolved)
+    if (roleErr) {
+        return roleErr
+    }
     if (resolved.skip) {
         return null
     }
-    const role = lifeline.represent
-    if (!role) {
-        return 'Lifeline "' + (lifeline.name || lifeline._id) + '" has no represent role, so its type cannot be set'
-    }
-    applyProperty(report, role, 'type', resolved.value, resolved.field)
+    applyProperty(report, lifeline.represent, 'type', resolved.value, resolved.field)
     return null
 }
 
@@ -3335,6 +3372,14 @@ function updateLifeline(id, body, reqInfo) {
     const lifeline = findById(id)
     if (!lifeline || !(lifeline instanceof type.UMLLifeline)) {
         return { success: false, error: 'Lifeline not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
+    }
+
+    // Before any write: a missing role used to surface after name, stereotype and
+    // documentation had already been applied, so the call reported failure for an
+    // update that had partly gone through.
+    const roleErr = checkRepresentRole(lifeline, represent)
+    if (roleErr) {
+        return validationError(roleErr, reqInfo, body)
     }
 
     const report = createWriteReport()
@@ -5502,12 +5547,20 @@ function resolveFeatureType(body) {
  * Takes the class rather than an instance so createChildElement can check
  * before it builds anything. Returns an error string, or null when accepted.
  */
-function checkFeatureFieldsSupported(typeName, isStructuralFeature, isParameter, body, featureType) {
+function checkFeatureFieldsSupported(typeName, isStructuralFeature, body, featureType) {
     if (!featureType.skip && !isStructuralFeature) {
         return 'Fields "typeId" and "typeName" are only supported for structural features (UMLAttribute, UMLParameter, UMLPort, ...). Got ' + typeName
     }
-    if (body.direction !== undefined && !isParameter) {
-        return 'Field "direction" is only supported for UMLParameter elements. Got ' + typeName
+    if (body.direction !== undefined) {
+        const domain = DIRECTION_DOMAINS[typeName]
+        if (!domain) {
+            return 'Field "direction" is only supported for ' + Object.keys(DIRECTION_DOMAINS).join(' and ') + ' elements. Got ' + typeName
+        }
+        // Check the value against this class's own domain, not a shared list:
+        // "return" is legal on a UMLParameter and illegal on a SysMLFlowProperty.
+        if (domain.indexOf(body.direction) === -1) {
+            return 'Invalid direction "' + body.direction + '" for ' + typeName + '. Allowed: ' + domain.join(', ')
+        }
     }
     return null
 }
@@ -5520,7 +5573,7 @@ function checkFeatureFieldsSupported(typeName, isStructuralFeature, isParameter,
 function checkFeatureFieldsForChildType(className, body, featureType) {
     const childClass = type[className]
     const isStructuralFeature = !!childClass && childClass.prototype instanceof type.UMLStructuralFeature
-    return checkFeatureFieldsSupported(className, isStructuralFeature, className === 'UMLParameter', body, featureType)
+    return checkFeatureFieldsSupported(className, isStructuralFeature, body, featureType)
 }
 
 function updateGenericElement(id, body, reqInfo) {
@@ -5538,8 +5591,8 @@ function updateGenericElement(id, body, reqInfo) {
         return validationError(err, reqInfo, body)
     }
 
-    if (body.direction !== undefined && VALID_PARAMETER_DIRECTIONS.indexOf(body.direction) === -1) {
-        return validationError('Invalid direction "' + body.direction + '". Allowed: ' + VALID_PARAMETER_DIRECTIONS.join(', '), reqInfo, body)
+    if (body.direction !== undefined && ALL_DIRECTION_VALUES.indexOf(body.direction) === -1) {
+        return validationError('Invalid direction "' + body.direction + '". Allowed: ' + ALL_DIRECTION_VALUES.join(', '), reqInfo, body)
     }
 
     const featureType = resolveFeatureType(body)
@@ -5570,7 +5623,6 @@ function updateGenericElement(id, body, reqInfo) {
     const featureErr = checkFeatureFieldsSupported(
         elem.constructor.name,
         elem instanceof type.UMLStructuralFeature,
-        elem instanceof type.UMLParameter,
         body,
         featureType
     )
@@ -6331,13 +6383,24 @@ function createDiagramRelation(diagramId, body, reqInfo) {
  */
 function listChildElements(parentId, query, reqInfo) {
     const requestedField = query && query.field ? query.field : null
-    if (requestedField && CHILD_CONTAINER_FIELDS.indexOf(requestedField) === -1) {
-        return validationError('Unknown child field "' + requestedField + '". Allowed: ' + CHILD_CONTAINER_FIELDS.join(', '), reqInfo)
-    }
 
     const parent = findById(parentId)
     if (!parent) {
         return { success: false, error: 'Parent element not found: ' + parentId, request: reqInfo }
+    }
+
+    // POST to this same path takes any `field`, not only the ones derived from
+    // CHILD_TYPE_DEFAULT_FIELDS, so rejecting everything outside that list made a
+    // write unreadable through the endpoint that wrote it: POST with
+    // field "ownedElements" succeeded and the matching GET answered "Unknown child
+    // field". Accept any field the parent actually carries as a collection, and
+    // keep rejecting the rest so a typo still reports itself instead of quietly
+    // coming back empty.
+    if (requestedField &&
+        CHILD_CONTAINER_FIELDS.indexOf(requestedField) === -1 &&
+        !Array.isArray(parent[requestedField])) {
+        return validationError('Unknown child field "' + requestedField + '" on ' +
+            parent.constructor.name + '. Known fields: ' + CHILD_CONTAINER_FIELDS.join(', '), reqInfo)
     }
 
     const fields = requestedField ? [requestedField] : CHILD_CONTAINER_FIELDS
@@ -6386,8 +6449,8 @@ function createChildElement(parentId, body, reqInfo) {
         return validationError('Invalid child type "' + body.type + '". Allowed: ' + ALLOWED_CHILD_TYPES.join(', '), reqInfo, body)
     }
 
-    if (body.direction !== undefined && VALID_PARAMETER_DIRECTIONS.indexOf(body.direction) === -1) {
-        return validationError('Invalid direction "' + body.direction + '". Allowed: ' + VALID_PARAMETER_DIRECTIONS.join(', '), reqInfo, body)
+    if (body.direction !== undefined && ALL_DIRECTION_VALUES.indexOf(body.direction) === -1) {
+        return validationError('Invalid direction "' + body.direction + '". Allowed: ' + ALL_DIRECTION_VALUES.join(', '), reqInfo, body)
     }
 
     const featureType = resolveFeatureType(body)

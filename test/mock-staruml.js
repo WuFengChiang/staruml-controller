@@ -49,6 +49,15 @@ class UMLStructuralFeature extends UMLFeature {
 }
 class UMLAttribute extends UMLStructuralFeature {}
 class UMLPort extends UMLAttribute {}
+// SysMLProperty extends UMLAttribute, and SysMLFlowProperty extends that with a
+// direction of its own — SysMLFlowDirectionKind, which has no "return".
+class SysMLProperty extends UMLAttribute {}
+class SysMLFlowProperty extends SysMLProperty {
+    constructor() {
+        super()
+        this.direction = 'inout'
+    }
+}
 class UMLParameter extends UMLStructuralFeature {
     constructor() {
         super()
@@ -199,7 +208,8 @@ const type = {
     UMLRealization, UMLInterfaceRealization, UMLComponentRealization,
     UMLGeneralization, Hyperlink, Tag, UMLSequenceDiagram, UMLClassDiagram,
     Point, UMLSeqMessageView,
-    UMLUndirectedRelationship, UMLAssociation, UMLAssociationEnd
+    UMLUndirectedRelationship, UMLAssociation, UMLAssociationEnd,
+    SysMLProperty, SysMLFlowProperty
 }
 type.UMLModel = UMLModel_
 

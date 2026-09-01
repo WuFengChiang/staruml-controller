@@ -412,6 +412,64 @@ check('but realizations still stay out of the dependency list',
     r.success && !r.data.some(function (d) { return d._type.indexOf('Realization') !== -1 }),
     r.data && r.data.map(function (d) { return d._type }))
 
+console.log('\n=== direction belongs to more than one class, with different values ===')
+
+// UMLParameter takes UMLDirectionKind (in/inout/out/return); SysMLFlowProperty
+// takes SysMLFlowDirectionKind (in/out/inout). Refusing direction on anything but
+// a UMLParameter made a flow property's direction unsettable; accepting the union
+// on both would let "return" through onto a flow property, which the engine has
+// no value for. Each class is checked against its own domain.
+const flowProp = mock.register(new t.SysMLFlowProperty(), 'itemIn', cls, 'attributes')
+
+r = api.route('PUT', '/api/elements/' + flowProp._id, { direction: 'out' })
+check('a SysMLFlowProperty accepts direction "out"', r.success, r.error)
+
+r = api.route('PUT', '/api/elements/' + flowProp._id, { direction: 'return' })
+check('but not "return", which is a UMLParameter value',
+    !r.success && /SysMLFlowProperty/.test(r.error || ''), r.error)
+
+r = api.route('PUT', '/api/elements/' + paramId, { direction: 'return' })
+check('a UMLParameter still accepts "return"', r.success, r.error)
+
+r = api.route('PUT', '/api/elements/' + cls._id, { direction: 'in' })
+check('a class, which has no direction at all, is refused',
+    !r.success && /direction/.test(r.error || ''), r.error)
+
+console.log('\n=== a rejected lifeline update must not have written anything ===')
+
+// updateLifeline applied name/stereotype/documentation and only then asked whether
+// the lifeline had a role to hang the type on. The caller read a failure for a
+// write that had already partly landed.
+const bareLifeline = mock.register(new t.UMLLifeline(), 'BeforeUpdate', interaction)
+bareLifeline.represent = null
+
+r = api.route('PUT', '/api/seq/lifelines/' + bareLifeline._id,
+    { name: 'AfterUpdate', representTypeId: cls._id })
+check('a lifeline with no role reports failure', !r.success, r.data)
+check('and its name was left alone', bareLifeline.name === 'BeforeUpdate', bareLifeline.name)
+
+console.log('\n=== children written with a field can be read back with it ===')
+
+// POST accepts any `field`; GET used to accept only the fields derived from
+// CHILD_TYPE_DEFAULT_FIELDS, so a write succeeded and the matching read answered
+// "Unknown child field".
+const holder = mock.register(new t.UMLClass(), 'Holder')
+holder.ownedElements = []
+
+r = api.route('POST', '/api/elements/' + holder._id + '/children',
+    { type: 'UMLAttribute', name: 'tucked', field: 'ownedElements' })
+check('POST can create a child into ownedElements', r.success, r.error)
+const tuckedId = r.success ? r.data._id : null
+
+r = api.route('GET', '/api/elements/' + holder._id + '/children?field=ownedElements')
+check('GET reads it back through the same field',
+    r.success && (r.data || []).some(function (c) { return c._id === tuckedId }),
+    r.error || r.data)
+
+r = api.route('GET', '/api/elements/' + holder._id + '/children?field=nosuchfield')
+check('but a field the parent does not carry is still an error',
+    !r.success && /Unknown child field/.test(r.error || ''), r.error)
+
 console.log('\n=== Every list endpoint still answers ===')
 
 // The exact-type filter lives in crud-factory, which builds the routes for all
