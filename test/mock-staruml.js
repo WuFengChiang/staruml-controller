@@ -152,6 +152,13 @@ class Hyperlink extends UMLModelElement {
     }
 }
 class Tag extends UMLModelElement {}
+class UMLConstraint extends UMLModelElement {
+    constructor() {
+        super()
+        this.specification = ''
+        this.constrainedElements = []
+    }
+}
 class UMLSequenceDiagram extends UMLModelElement {
     constructor() {
         super()
@@ -190,6 +197,138 @@ class UMLSeqMessageView extends Element {
     }
 }
 
+// --- Views, enough to exercise edge re-pointing and parasitic geometry ---
+//
+// The parasitic classes below reproduce StarUML's ARRANGE side of the contract
+// (EdgeParasiticView.arrangeObject and Coord.getPointAwayLine, ported from
+// app.asar). The controller supplies the inverse. A round trip through both is
+// the only offline way to show the inverse is right; it proves the arithmetic,
+// not that StarUML calls arrange when the controller expects it to.
+class View extends Element {
+    constructor() {
+        super()
+        this.model = null
+        this.subViews = []
+    }
+    assignTo(memento) {
+        Object.keys(this).forEach(function (k) { memento[k] = this[k] }, this)
+    }
+    assignFrom(memento) {
+        Object.keys(memento).forEach(function (k) { this[k] = memento[k] }, this)
+    }
+    diff(memento) {
+        const out = []
+        Object.keys(this).forEach(function (k) {
+            if (this[k] !== memento[k]) out.push({ elem: this, f: k, n: this[k], o: memento[k] })
+        }, this)
+        return out
+    }
+    getDiagram() {
+        let n = this._parent
+        while (n) {
+            if (Array.isArray(n.ownedViews)) return n
+            n = n._parent
+        }
+        return null
+    }
+}
+class NodeView extends View {
+    constructor() {
+        super()
+        this.left = 0
+        this.top = 0
+        this.width = 0
+        this.height = 0
+    }
+    getRight() { return this.left + this.width }
+    getBottom() { return this.top + this.height }
+    getCenter() { return new Point(this.left + this.width / 2, this.top + this.height / 2) }
+}
+class EdgeView extends View {
+    constructor() {
+        super()
+        this.points = new Points()
+        this.tail = null
+        this.head = null
+    }
+}
+class UMLAssociationView extends EdgeView {}
+class ParasiticView extends NodeView {
+    constructor() {
+        super()
+        this.alpha = 0
+        this.distance = 0
+    }
+}
+class NodeParasiticView extends ParasiticView {
+    constructor() {
+        super()
+        this.hostNode = null
+    }
+}
+class EdgeParasiticView extends ParasiticView {
+    constructor() {
+        super()
+        this.hostEdge = null
+        this.edgePosition = 0
+    }
+}
+class EdgeLabelView extends EdgeParasiticView {}
+
+// Port of Coord.getPointAwayLine (app.asar). Do not "clean up" the arithmetic:
+// the controller's inverse is written against exactly this.
+function getPointAwayLine(tailPoint, headPoint, alpha, distance) {
+    const a = tailPoint.x - headPoint.x
+    const b = tailPoint.y - headPoint.y
+    let th = Math.atan(Math.abs(b) / (Math.abs(a) + 0.000001))
+    if (a > 0) {
+        th = b > 0 ? Math.PI - th : th + Math.PI
+    } else if (b < 0) {
+        th = 2 * Math.PI - th
+    }
+    const x = distance * Math.cos(th + alpha)
+    const y = distance * Math.sin(th + alpha)
+    return new Point(Math.floor(x), Math.floor(-y))
+}
+
+// Port of EdgeParasiticView.arrangeObject / NodeParasiticView.arrange.
+function arrangeParasitic(view) {
+    let p1
+    let p2
+    if (view instanceof NodeParasiticView) {
+        const node = view.hostNode || view._parent
+        if (!node) return
+        p1 = new Point((node.left + node.getRight()) / 2, (node.top + node.getBottom()) / 2)
+        p2 = p1
+        const pn = getPointAwayLine(p1, p2, view.alpha, view.distance)
+        view.left = pn.x + p1.x - view.width / 2
+        view.top = pn.y + p1.y - view.height / 2
+        return
+    }
+    const edge = view.hostEdge || view._parent
+    if (!edge || !edge.points || edge.points.count() < 2) return
+    const count = edge.points.count()
+    if (view.edgePosition === 0) {
+        p1 = edge.points.getPoint(count - 1)
+        p2 = edge.points.getPoint(count - 2)
+    } else if (view.edgePosition === 2) {
+        p1 = edge.points.getPoint(0)
+        p2 = edge.points.getPoint(1)
+    } else {
+        let mid = Math.floor(count / 2)
+        if (count % 2 === 0) mid -= 1
+        const a = edge.points.getPoint(mid)
+        const b = edge.points.getPoint(mid + 1)
+        p2 = b
+        p1 = count % 2 === 0
+            ? new Point(Math.floor((a.x + b.x) / 2), Math.floor((a.y + b.y) / 2))
+            : a
+    }
+    const p = getPointAwayLine(p1, p2, view.alpha, view.distance)
+    view.left = p.x + p1.x - Math.floor(view.width / 2)
+    view.top = p.y + p1.y - Math.floor(view.height / 2)
+}
+
 // StarUML's sequence layout will not place a new message more than this far
 // below the previous one. The number reproduces behaviour observed against a
 // live instance; it is NOT read from StarUML's source. Its job here is to let
@@ -206,10 +345,12 @@ const type = {
     UMLInteraction, UMLMessageEndpoint, UMLLifeline, UMLMessage,
     UMLRelationship, UMLDirectedRelationship, UMLDependency, UMLAbstraction,
     UMLRealization, UMLInterfaceRealization, UMLComponentRealization,
-    UMLGeneralization, Hyperlink, Tag, UMLSequenceDiagram, UMLClassDiagram,
+    UMLGeneralization, Hyperlink, Tag, UMLConstraint, UMLSequenceDiagram, UMLClassDiagram,
     Point, UMLSeqMessageView,
     UMLUndirectedRelationship, UMLAssociation, UMLAssociationEnd,
-    SysMLProperty, SysMLFlowProperty
+    SysMLProperty, SysMLFlowProperty,
+    View, NodeView, EdgeView, UMLAssociationView,
+    ParasiticView, NodeParasiticView, EdgeParasiticView, EdgeLabelView
 }
 type.UMLModel = UMLModel_
 
@@ -260,8 +401,59 @@ function makeMessageView(msg, options) {
     return view
 }
 
+// StarUML pushes every write onto an undo stack; the controller now reads its
+// depth to tell "undone" from "nothing to undo". Only the depth is modelled —
+// this mock does not revert anything.
+const undoStack = []
+const redoStack = []
+
+/**
+ * Stand-in for Diagram.drawDiagram: arrange every parasitic view on the
+ * diagram, the way a repaint does in StarUML.
+ */
+function repaintDiagram(diagram) {
+    if (!diagram || !Array.isArray(diagram.ownedViews)) return
+    diagram.ownedViews.forEach(function (v) {
+        (v.subViews || []).forEach(function (sv) {
+            if (sv instanceof ParasiticView) arrangeParasitic(sv)
+        })
+        if (v instanceof ParasiticView) arrangeParasitic(v)
+    })
+}
+
 const app = {
     repository: {
+        _undoStack: { size: function () { return undoStack.length } },
+        _redoStack: { size: function () { return redoStack.length } },
+        undo: function () {
+            if (undoStack.length > 0) redoStack.push(undoStack.pop())
+        },
+        redo: function () {
+            if (redoStack.length > 0) undoStack.push(redoStack.pop())
+        },
+        getOperationBuilder: function () {
+            let ops = []
+            return {
+                begin: function () { ops = [] },
+                fieldAssign: function (elem, f, n) { ops.push({ elem: elem, f: f, n: n }) },
+                end: function () {},
+                getOperation: function () { return { ops: ops } }
+            }
+        },
+        doOperation: function (op) {
+            if (!op || !op.ops || op.ops.length === 0) return
+            op.ops.forEach(function (o) { o.elem[o.f] = o.n })
+            undoStack.push(op)
+            redoStack.length = 0
+        },
+        getViewsOf: function (model) {
+            return store.filter(function (e) { return e && e.model === model })
+        },
+        getEdgeViewsOf: function (view) {
+            return store.filter(function (e) {
+                return e instanceof EdgeView && (e.head === view || e.tail === view)
+            })
+        },
         get: function (id) {
             return store.filter(function (e) { return e._id === id })[0] || null
         },
@@ -281,6 +473,37 @@ const app = {
     engine: {
         setProperty: function (target, prop, value) {
             target[prop] = value
+            undoStack.push({ ops: [{ elem: target, f: prop, n: value }] })
+            redoStack.length = 0
+        },
+        addItem: function (elem, field, val) {
+            if (Array.isArray(elem[field])) {
+                elem[field].push(val)
+                undoStack.push({ ops: [] })
+            }
+        },
+        removeItem: function (elem, field, val) {
+            if (Array.isArray(elem[field])) {
+                const i = elem[field].indexOf(val)
+                if (i !== -1) elem[field].splice(i, 1)
+                undoStack.push({ ops: [] })
+            }
+        },
+        // Mirrors Engine.moveParasiticView: set the polar pair, repaint so
+        // arrange recomputes left/top, then keep both.
+        moveParasiticView: function (editor, view, alpha, distance) {
+            view.alpha = alpha
+            view.distance = distance
+            if (editor && typeof editor.repaint === 'function') editor.repaint()
+            undoStack.push({ ops: [] })
+        },
+        // Enough to show that the controller reaches the engine for diagram
+        // types it allows. It does not lay anything out — the real one runs
+        // dagre and then diffs views by index across a repaint, which is the
+        // behaviour that makes it unusable on a sequence diagram.
+        layoutDiagram: function (editor, diagram) {
+            if (editor && typeof editor.repaint === 'function') editor.repaint()
+            undoStack.push({ ops: [] })
         },
         deleteElements: function (elems) {
             elems.forEach(function (e) {
@@ -288,6 +511,14 @@ const app = {
                 if (i !== -1) store.splice(i, 1)
             })
         }
+    },
+    diagrams: {
+        _current: null,
+        _hidden: { diagram: null, repaint: function () { repaintDiagram(this.diagram) } },
+        getEditor: function () {
+            return { diagram: app.diagrams._current, repaint: function () { repaintDiagram(app.diagrams._current) } }
+        },
+        getHiddenEditor: function () { return app.diagrams._hidden }
     },
     factory: {
         createModel: function (options) {
@@ -330,4 +561,4 @@ const app = {
     }
 }
 
-module.exports = { app, type, store, register, nextId }
+module.exports = { app, type, store, register, nextId, arrangeParasitic, repaintDiagram, Point }

@@ -46,29 +46,37 @@ ORIGINAL="$(printf '%s' "$STATUS" | jq_get "d['data'].get('project',{}).get('fil
 echo "   current project: ${ORIGINAL:-<none>}"
 
 echo "== 2. Is the build under test loaded? =="
-# Ask for a child field the parent cannot have, on an id that does not exist.
-# Each build answers differently, so one request tells all three apart:
-#   this build   the unknown-field check moved after the parent lookup, so the
-#                missing parent is reported first
-#   previous     the field was checked against a fixed whitelist before anything
-#                else, so it complains about the field
-#   older still  the route did not exist and the router falls through
+# GET /api/status/capabilities now publishes the body fields each general write
+# accepts, read straight from the constants the handlers validate against. That
+# makes it the build marker: `specification` on PUT /api/elements/:id appeared
+# with the constraint fixes and nothing else adds it.
 #
 # Do not use /api/status for this. The version there comes from package.json, and
 # package.json only changes when someone bumps it — editing handlers moves no
 # version number at all.
-PROBE="$(api GET "/api/elements/probe-not-a-real-id/children?field=ownedElements" | jq_get "d.get('error','')")"
+CAPS="$(api GET /api/status/capabilities)"
+PROBE="$(printf '%s' "$CAPS" | jq_get "','.join(d.get('data',{}).get('writableFields',{}).get('PUT /api/elements/:id',[]))")"
 case "$PROBE" in
-    *"Parent element not found"*) echo "   build under test is loaded." ;;
-    *"Unknown child field"*)
-        echo "ABORT: StarUML is running the previous build (subtype fixes only)."
+    *specification*) echo "   build under test is loaded." ;;
+    "")
+        # Either an older build with no writableFields at all, or no server.
+        OLD="$(api GET "/api/elements/probe-not-a-real-id/children?field=ownedElements" | jq_get "d.get('error','')")"
+        case "$OLD" in
+            *"Parent element not found"*)
+                echo "ABORT: StarUML is running the previous build (list/type fixes, no constraint or signature fields)." ;;
+            *"Unknown child field"*)
+                echo "ABORT: StarUML is running the subtype-fixes build." ;;
+            *"Not found: GET"*)
+                echo "ABORT: StarUML is running a build older than all of those." ;;
+            *)
+                echo "ABORT: unexpected probe response: $OLD" ;;
+        esac
         echo "       Quit StarUML (Cmd+Q), reopen it, start the server, then rerun."
         exit 1 ;;
-    *"Not found: GET"*)
-        echo "ABORT: StarUML is running a build older than both."
-        echo "       Quit StarUML (Cmd+Q), reopen it, start the server, then rerun."
+    *)
+        echo "ABORT: capabilities answered, but PUT /api/elements/:id does not take specification."
+        echo "       fields seen: $PROBE"
         exit 1 ;;
-    *) echo "ABORT: unexpected probe response: $PROBE"; exit 1 ;;
 esac
 
 if [ -z "$ORIGINAL" ]; then

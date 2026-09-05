@@ -301,8 +301,343 @@ if it and c1:
             else:
                 check("second message created", False, m2.get("error"))
 
+
+# ============================================================
+# Gaps reported from a live modelling session (A/B/C list)
+#
+# These call the same endpoints the reporting side calls, and then do what the
+# reporting side does to accept a fix: save the project and read the field back
+# out of the .mdj with json.load. A value that is only correct in memory is not
+# a fix — it disappears at the next save.
+# ============================================================
+
+SAVE_PATH = "/tmp/staruml_gapcheck_%d.mdj" % os.getpid()
+_saved_doc = None
+
+
+def save_and_load():
+    """Save the open project and return the parsed .mdj, or None."""
+    global _saved_doc
+    res = api("POST", "/api/project/save", {"path": SAVE_PATH})
+    if not res.get("success"):
+        check("project saves to %s" % SAVE_PATH, False, res.get("error"))
+        return None
+    try:
+        with open(SAVE_PATH) as fh:
+            _saved_doc = json.load(fh)
+    except Exception as e:
+        check("the saved .mdj parses", False, str(e))
+        return None
+    return _saved_doc
+
+
+def find_node(doc, _id):
+    """Depth-first search for the element with this _id in a parsed .mdj."""
+    stack = [doc]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if node.get("_id") == _id:
+                return node
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return None
+
+
+print("\n=== A-3: a constraint is created where it can actually live ===")
+CONSTRAINT_ID = None
+if c1:
+    made = api("POST", "/api/elements/%s/children" % enc(c1["_id"]),
+               {"type": "UMLConstraint", "name": "xorGroup", "specification": "{xor}"})
+    cdata = need("create a UMLConstraint with no field given", made)
+    if cdata:
+        CONSTRAINT_ID = cdata["_id"]
+        check("the response says which field it used",
+              cdata.get("field") == "ownedElements", cdata)
+        back = api("GET", "/api/elements/%s/children?field=ownedElements" % enc(c1["_id"]))
+        hit = [x for x in (back.get("data") or []) if x.get("_id") == CONSTRAINT_ID]
+        check("the constraint reads back out of the model", len(hit) == 1, back.get("data"))
+        if hit:
+            check("with the specification StarUML draws on the canvas",
+                  hit[0].get("specification") == "{xor}", hit[0])
+
+    bad = api("POST", "/api/elements/%s/children" % enc(c1["_id"]),
+              {"type": "UMLConstraint", "name": "nope", "field": "constraints"})
+    check("the old default field is refused instead of writing nowhere",
+          bad.get("success") is False and "not a collection" in str(bad.get("error")), bad)
+
+print("\n=== B-2 / B-3: specification and constrainedElements survive a save ===")
+if CONSTRAINT_ID and c1 and c2:
+    w = api("PUT", "/api/elements/%s" % enc(CONSTRAINT_ID),
+            {"specification": "{xor} exactly one of these applies",
+             "constrainedElementIds": [c1["_id"], c2["_id"]]})
+    check("both constraint fields are accepted", w.get("success"), w.get("error"))
+    check("and the response reports no ignored write",
+          w.get("ignored") is None and w.get("clamped") is None,
+          {"ignored": w.get("ignored"), "clamped": w.get("clamped")})
+
+    rb = api("GET", "/api/elements/%s" % enc(CONSTRAINT_ID))
+    b = rb.get("data") or {}
+    check("the constraint reads back with both fields",
+          b.get("specification") == "{xor} exactly one of these applies" and
+          b.get("constrainedElementIds") == [c1["_id"], c2["_id"]], b)
+
+    doc = save_and_load()
+    if doc:
+        node = find_node(doc, CONSTRAINT_ID)
+        check("the constraint is in the saved .mdj", node is not None, SAVE_PATH)
+        if node:
+            check("specification survived the save",
+                  node.get("specification") == "{xor} exactly one of these applies", node)
+            refs = [r.get("$ref") for r in (node.get("constrainedElements") or [])
+                    if isinstance(r, dict)]
+            check("constrainedElements survived the save as references",
+                  refs == [c1["_id"], c2["_id"]], node.get("constrainedElements"))
+
+print("\n=== B-1: a message names the operation it invokes ===")
+# Reuses the interaction, lifelines and message built for gap 4 above.
+try:
+    _msg_id = (m1.get("data") or {}).get("_id")
+except NameError:
+    _msg_id = None
+_op_id = None
+if c1:
+    _ops = api("GET", "/api/class/classes/%s/operations" % enc(c1["_id"])).get("data") or []
+    _op_id = _ops[0]["_id"] if _ops else None
+
+if _msg_id and _op_id:
+    w = api("PUT", "/api/seq/messages/%s" % enc(_msg_id),
+            {"signature": _op_id, "arguments": "orderId"})
+    check("signature and arguments are accepted", w.get("success"), w.get("error"))
+    check("no field was silently dropped",
+          w.get("ignored") is None, w.get("ignored"))
+    rb = api("GET", "/api/seq/messages/%s" % enc(_msg_id)).get("data") or {}
+    check("the message reads back pointing at the operation",
+          rb.get("signatureId") == _op_id and rb.get("arguments") == "orderId", rb)
+
+    if c2:
+        refused = api("PUT", "/api/seq/messages/%s" % enc(_msg_id), {"signature": c2["_id"]})
+        check("a class is refused as a signature",
+              refused.get("success") is False and "UMLOperation" in str(refused.get("error")), refused)
+
+    doc = save_and_load()
+    if doc:
+        node = find_node(doc, _msg_id)
+        check("the message is in the saved .mdj", node is not None, SAVE_PATH)
+        if node:
+            sig = node.get("signature")
+            check("signature survived the save as a reference",
+                  isinstance(sig, dict) and sig.get("$ref") == _op_id, sig)
+            check("arguments survived the save", node.get("arguments") == "orderId", node.get("arguments"))
+else:
+    notes.append("skipped B-1: no message or operation from the earlier sections")
+
+print("\n=== C-1: an update may clear a name ===")
+if c1 and c2:
+    a2 = api("POST", "/api/class/associations",
+             {"diagramId": DID, "sourceId": c1["_id"], "targetId": c2["_id"], "name": "temporary"})
+    adata = a2.get("data")
+    if adata:
+        w = api("PUT", "/api/elements/%s" % enc(adata["_id"]), {"name": ""})
+        check("a generated relation name can be cleared", w.get("success"), w.get("error"))
+        rb = api("GET", "/api/class/associations/%s" % enc(adata["_id"])).get("data") or {}
+        check("and it reads back empty", rb.get("name") == "", rb.get("name"))
+
+print("\n=== C-2: `type` writes the same property `typeName` does ===")
+if c1 and c2:
+    at2 = api("POST", "/api/elements/%s/children" % enc(c1["_id"]),
+              {"type": "UMLAttribute", "name": "total"}).get("data")
+    if at2:
+        w = api("PUT", "/api/elements/%s" % enc(at2["_id"]), {"type": "Money"})
+        check("PUT /api/elements accepts `type`", w.get("success"), w.get("error"))
+        rb = api("GET", "/api/elements/%s" % enc(at2["_id"])).get("data") or {}
+        check("and the read side reports type and typeName as the same value",
+              rb.get("type") == "Money" and rb.get("typeName") == "Money", rb)
+        both = api("PUT", "/api/elements/%s" % enc(at2["_id"]), {"type": "A", "typeName": "B"})
+        check("giving both at once is refused",
+              both.get("success") is False and "mutually exclusive" in str(both.get("error")), both)
+
+print("\n=== C-3: a classifier can be created with no diagram ===")
+_pkgs = api("GET", "/api/class/packages").get("data") or []
+if _pkgs:
+    made = api("POST", "/api/elements/%s/children" % enc(_pkgs[0]["_id"]),
+               {"type": "UMLClass", "name": "ModelOnlyClass"})
+    mdata = need("create a UMLClass as a model element only", made)
+    if mdata:
+        views = api("GET", "/api/elements/%s/views" % enc(mdata["_id"])).get("data") or []
+        check("it exists with no view on any diagram", len(views) == 0, views)
+        listed = api("GET", "/api/class/classes").get("data") or []
+        check("and it is listed as a class",
+              mdata["_id"] in {x.get("_id") for x in listed}, len(listed))
+else:
+    notes.append("skipped C-3: no package in the scratch project")
+
+print("\n=== A-1: an association end moves without a rebuild ===")
+if c1 and c2:
+    c3 = api("POST", "/api/class/classes",
+             {"diagramId": DID, "name": "MovedTarget", "x1": 1100, "y1": 420}).get("data")
+    a3 = api("POST", "/api/class/associations",
+             {"diagramId": DID, "sourceId": c1["_id"], "targetId": c2["_id"], "name": "moves"}).get("data")
+    if c3 and a3:
+        before_views = api("GET", "/api/elements/%s/views" % enc(a3["_id"])).get("data") or []
+        w = api("PUT", "/api/class/associations/%s" % enc(a3["_id"]),
+                {"end2": {"reference": c3["_id"]}})
+        check("end2.reference is accepted", w.get("success"), w.get("error"))
+        check("and the engine kept it, rather than reporting an ignored write",
+              not any(i.get("field", "").endswith("end2.reference")
+                      for i in (w.get("ignored") or [])), w.get("ignored"))
+
+        rb = api("GET", "/api/class/associations/%s" % enc(a3["_id"])).get("data") or {}
+        check("the association reads back attached to the new class",
+              (rb.get("end2") or {}).get("reference") == c3["_id"], rb.get("end2"))
+        check("the association kept its id — no delete-and-rebuild",
+              rb.get("_id") == a3["_id"], rb.get("_id"))
+        after_views = api("GET", "/api/elements/%s/views" % enc(a3["_id"])).get("data") or []
+        check("and its views were not destroyed",
+              len(after_views) == len(before_views) and len(after_views) > 0,
+              {"before": len(before_views), "after": len(after_views)})
+
+        doc = save_and_load()
+        if doc:
+            node = find_node(doc, a3["_id"])
+            check("the association is in the saved .mdj", node is not None, SAVE_PATH)
+            if node:
+                end2 = node.get("end2") or {}
+                ref = end2.get("reference") or {}
+                check("end2.reference survived the save",
+                      isinstance(ref, dict) and ref.get("$ref") == c3["_id"], end2)
+
+        pkgs = api("GET", "/api/class/packages").get("data") or []
+        if pkgs:
+            refused = api("PUT", "/api/class/associations/%s" % enc(a3["_id"]),
+                          {"end1": {"reference": pkgs[0]["_id"]}})
+            check("an end cannot be pointed at a package",
+                  refused.get("success") is False and "UMLClassifier" in str(refused.get("error")),
+                  refused)
+
+print("\n=== A-2: an edge label takes left/top ===")
+# The label views live under the association's edge view as subviews.
+_label = None
+_edge_view_id = None
+if c1 and c2:
+    a4 = api("POST", "/api/class/associations",
+             {"diagramId": DID, "sourceId": c1["_id"], "targetId": c2["_id"], "name": "labelled"}).get("data")
+    if a4:
+        # GET /api/elements/:id/views reports the view id as `viewId`, not `_id`,
+        # and one row per diagram — pick the row for the diagram we built on.
+        evs = api("GET", "/api/elements/%s/views" % enc(a4["_id"])).get("data") or []
+        mine_ev = [v for v in evs if v.get("diagramId") == DID] or evs
+        if mine_ev:
+            _edge_view_id = mine_ev[0].get("viewId")
+        if _edge_view_id:
+            # GET /api/views/:id/subviews reports each subview through
+            # serializeViewInfo, so `_id`, `alpha` and `role` are the real keys.
+            subs = api("GET", "/api/views/%s/subviews" % enc(_edge_view_id)).get("data") or []
+            labels = [s for s in subs if s.get("role") == "nameLabel"] or \
+                     [s for s in subs if s.get("alpha") is not None]
+            _label = labels[0] if labels else None
+        if not _label:
+            notes.append("A-2 setup: edge view id %s, subviews seen: %s"
+                         % (_edge_view_id, [s.get("_type") for s in
+                            (api("GET", "/api/views/%s/subviews" % enc(_edge_view_id)).get("data") or [])]))
+
+if _label:
+    LID = _label["_id"]
+    want_left, want_top = 900, 40
+    w = api("PUT", "/api/views/%s" % enc(LID), {"left": want_left, "top": want_top})
+    check("left/top on an edge label are accepted", w.get("success"), w.get("error"))
+    check("and the write is not reported as ignored",
+          not any(i.get("field") in ("left", "top") for i in (w.get("ignored") or [])),
+          w.get("ignored"))
+    rb = api("GET", "/api/views/%s/subviews" % enc(_edge_view_id)).get("data") or []
+    hit = [s for s in rb if s.get("_id") == LID]
+    if hit:
+        got = hit[0]
+        # StarUML floors twice while arranging, so allow a pixel either way.
+        check("the label sits within a pixel of where it was asked, with no export step",
+              abs((got.get("left") or 0) - want_left) <= 1 and abs((got.get("top") or 0) - want_top) <= 1,
+              {"left": got.get("left"), "top": got.get("top")})
+        check("and the polar pair the engine stores was written too",
+              got.get("distance") is not None and got.get("alpha") is not None, got)
+    doc = save_and_load()
+    if doc:
+        node = find_node(doc, LID)
+        check("the label is in the saved .mdj", node is not None, SAVE_PATH)
+        if node:
+            check("left/top survived the save, not just alpha/distance",
+                  abs((node.get("left") or 0) - want_left) <= 1 and
+                  abs((node.get("top") or 0) - want_top) <= 1,
+                  {"left": node.get("left"), "top": node.get("top"),
+                   "alpha": node.get("alpha"), "distance": node.get("distance")})
+else:
+    notes.append("skipped A-2: no edge label view found under the association")
+
+print("\n=== A-4: undo says whether it undid anything ===")
+u = api("POST", "/api/undo")
+check("undo reports the stack it worked on",
+      u.get("success") is True and isinstance((u.get("data") or {}).get("stackSizeBefore"), int), u)
+if u.get("success"):
+    check("and the stack actually shrank",
+          u["data"]["stackSizeAfter"] < u["data"]["stackSizeBefore"], u.get("data"))
+    rr = api("POST", "/api/redo")
+    check("redo puts it back", rr.get("success"), rr.get("error"))
+
+print("\n=== C-4: moving a message re-sorts the interaction's message list ===")
+# Only UMLSequenceDiagram.drawDiagram() re-sorts interaction.messages, and that
+# runs on a draw. The write now draws before it answers; this is the check that
+# says so. Build two messages, then move the second above the first.
+try:
+    _int_id, _sd_id2, _l1, _l2 = INT, sd["_id"], l1, l2
+except (NameError, TypeError):
+    _int_id = _sd_id2 = _l1 = _l2 = None
+
+if _int_id and _l1 and _l2:
+    early = api("POST", "/api/seq/interactions/%s/messages" % enc(_int_id),
+                {"source": _l1["_id"], "target": _l2["_id"], "name": "reorder_a",
+                 "diagramId": _sd_id2, "y": 300}).get("data")
+    later = api("POST", "/api/seq/interactions/%s/messages" % enc(_int_id),
+                {"source": _l1["_id"], "target": _l2["_id"], "name": "reorder_b",
+                 "diagramId": _sd_id2, "y": 340}).get("data")
+    if early and later:
+        check("a created message reports its place in the list",
+              isinstance(early.get("messageIndex"), int), early)
+        # Move reorder_b above reorder_a. StarUML caps how far a message may move,
+        # so assert the relative order rather than a coordinate.
+        moved = api("PUT", "/api/seq/messages/%s" % enc(later["_id"]),
+                    {"y": (early.get("view") or {}).get("y", 300) - 40})
+        check("the move is accepted", moved.get("success"), moved.get("error"))
+        after_b = (moved.get("data") or {}).get("messageIndex")
+        after_a = (api("GET", "/api/seq/messages/%s" % enc(early["_id"]))
+                   .get("data") or {}).get("messageIndex")
+        if isinstance(after_a, int) and isinstance(after_b, int):
+            if (moved.get("data") or {}).get("view", {}).get("y", 0) < (early.get("view") or {}).get("y", 0):
+                check("the message that is now higher comes first in the list",
+                      after_b < after_a, {"moved": after_b, "other": after_a})
+            else:
+                notes.append("message y was clamped back below the other one; "
+                             "list order not asserted (moved=%s other=%s)" % (after_b, after_a))
+        else:
+            check("both messages report a messageIndex", False,
+                  {"moved": after_b, "other": after_a})
+else:
+    notes.append("skipped the message reorder check: no interaction or lifelines")
+
+print("\n=== C-4: layout is refused on a sequence diagram ===")
+try:
+    _sd_id = sd["_id"]
+except (NameError, TypeError):
+    _sd_id = None
+if _sd_id:
+    lay = api("POST", "/api/diagrams/%s/layout" % enc(_sd_id), {})
+    check("layout on a UMLSequenceDiagram is refused",
+          lay.get("success") is False and "destroy its arrangement" in str(lay.get("error")), lay)
+cls_lay = api("POST", "/api/diagrams/%s/layout" % enc(DID), {})
+check("a class diagram still lays out", cls_lay.get("success"), cls_lay.get("error"))
+
 print("")
 for n in notes:
     print("note: " + n)
+print("saved snapshots for inspection: %s" % SAVE_PATH)
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(0 if failed == 0 else 1)

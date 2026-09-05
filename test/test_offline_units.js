@@ -545,5 +545,355 @@ check('a classifier-typed attribute reports typeId and a name, not the element',
     }),
     withAttr && withAttr.attributes)
 
+// ============================================================
+// Gaps reported from a live modelling session (A/B/C list)
+// ============================================================
+
+console.log('\n=== A-3: a child written to a field the parent lacks must fail loudly ===')
+
+const constraintHost = mock.register(new t.UMLClass(), 'Invoice')
+constraintHost.ownedElements = []
+
+r = api.route('POST', '/api/elements/' + constraintHost._id + '/children',
+    { type: 'UMLConstraint', name: 'xorGroup', specification: '{xor}' })
+check('a UMLConstraint is created without being told where to put it',
+    r.success === true && r.data && r.data._type === 'UMLConstraint', r)
+check('and it says which field it used',
+    r.success && r.data && r.data.field === 'ownedElements', r.data)
+check('and it really is in the parent collection',
+    constraintHost.ownedElements.some(function (c) { return c._type === undefined && c.name === 'xorGroup' }),
+    constraintHost.ownedElements.map(function (c) { return c.name }))
+check('and the specification went in with it',
+    r.success && r.data && r.data.specification === '{xor}', r.data)
+
+const createdConstraint = constraintHost.ownedElements.filter(function (c) { return c.name === 'xorGroup' })[0]
+
+r = api.route('POST', '/api/elements/' + constraintHost._id + '/children',
+    { type: 'UMLConstraint', name: 'nope', field: 'constraints' })
+check('the old default field is refused instead of writing nowhere',
+    r.success === false && /not a collection/.test(r.error || ''), r)
+check('and the refusal names the fields that would have worked',
+    r.success === false && /ownedElements/.test(r.error || ''), r.error)
+
+r = api.route('GET', '/api/elements/' + constraintHost._id + '/children?field=ownedElements')
+check('the constraint reads back through the field the write used',
+    r.success && r.data.some(function (c) { return c.name === 'xorGroup' }), r.data)
+
+r = api.route('POST', '/api/elements/' + constraintHost._id + '/children',
+    { type: 'UMLClass', name: 'Nested', specification: 'x' })
+check('specification is refused for a type that has none',
+    r.success === false && /only supported for UMLConstraint/.test(r.error || ''), r)
+
+console.log('\n=== C-3: a classifier can be created without picking a diagram ===')
+
+const pkg = mock.register(new t.UMLPackage(), 'Domain')
+pkg.ownedElements = []
+r = api.route('POST', '/api/elements/' + pkg._id + '/children', { type: 'UMLClass', name: 'Receipt' })
+check('a UMLClass is created as a model element only',
+    r.success === true && r.data && r.data.name === 'Receipt', r)
+check('and it lands in the package',
+    pkg.ownedElements.some(function (c) { return c.name === 'Receipt' }),
+    pkg.ownedElements.map(function (c) { return c.name }))
+
+console.log('\n=== B-2 / B-3: constraint specification and constrainedElements ===')
+
+const cA = mock.register(new t.UMLClass(), 'PaymentByCard')
+const cB = mock.register(new t.UMLClass(), 'PaymentByCash')
+
+r = api.route('PUT', '/api/elements/' + createdConstraint._id, { specification: '{xor} exactly one applies' })
+check('specification is settable',
+    r.success === true && createdConstraint.specification === '{xor} exactly one applies', r)
+check('and reads back on the same element',
+    r.data && r.data.specification === '{xor} exactly one applies', r.data)
+
+r = api.route('PUT', '/api/elements/' + cA._id, { specification: 'nope' })
+check('but not on a class',
+    r.success === false && /only supported for UMLConstraint/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/elements/' + createdConstraint._id,
+    { constrainedElementIds: [cA._id, cB._id] })
+check('constrainedElements is settable',
+    r.success === true && createdConstraint.constrainedElements.length === 2, r)
+check('and reads back as ids and names',
+    r.data && r.data.constrainedElementIds.join(',') === cA._id + ',' + cB._id &&
+    r.data.constrainedElementNames.join(',') === 'PaymentByCard,PaymentByCash', r.data)
+
+r = api.route('PUT', '/api/elements/' + createdConstraint._id, { constrainedElementIds: [cB._id] })
+check('writing the list again replaces it rather than appending',
+    r.success === true && createdConstraint.constrainedElements.length === 1 &&
+    createdConstraint.constrainedElements[0] === cB, createdConstraint.constrainedElements.length)
+
+r = api.route('PUT', '/api/elements/' + createdConstraint._id, { constrainedElementIds: [cA._id, 'no-such-id'] })
+check('a bad id in the list is refused',
+    r.success === false && /not found/.test(r.error || ''), r)
+check('and the list was left as it was',
+    createdConstraint.constrainedElements.length === 1 && createdConstraint.constrainedElements[0] === cB,
+    createdConstraint.constrainedElements.map(function (c) { return c.name }))
+
+r = api.route('PUT', '/api/elements/' + createdConstraint._id, { constrainedElementIds: 'not-an-array' })
+check('and so is a non-array',
+    r.success === false && /must be an array/.test(r.error || ''), r)
+
+console.log('\n=== C-1: an update may clear a name ===')
+
+const namedAssoc = mock.register(new t.UMLAssociation(), 'Association1')
+namedAssoc.end1 = mock.register(new t.UMLAssociationEnd(), '')
+namedAssoc.end2 = mock.register(new t.UMLAssociationEnd(), '')
+namedAssoc.end1.reference = cA
+namedAssoc.end2.reference = cB
+
+r = api.route('PUT', '/api/elements/' + namedAssoc._id, { name: '' })
+check('a generated relation name can be cleared',
+    r.success === true && namedAssoc.name === '', r)
+
+console.log('\n=== C-2: `type` and `typeName` are one property under two names ===')
+
+const typedAttr = mock.register(new t.UMLAttribute(), 'amount', cA, 'attributes')
+
+r = api.route('PUT', '/api/elements/' + typedAttr._id, { type: 'Money' })
+check('PUT /api/elements accepts `type`, the spelling POST .../attributes takes',
+    r.success === true && typedAttr.type === 'Money', r)
+check('and the response reports type, typeName and no third answer',
+    r.data && r.data.type === 'Money' && r.data.typeName === 'Money', r.data)
+
+r = api.route('PUT', '/api/elements/' + typedAttr._id, { type: 'A', typeName: 'B' })
+check('giving both spellings at once is refused rather than silently picking one',
+    r.success === false && /mutually exclusive/.test(r.error || ''), r)
+
+console.log('\n=== B-1: a message can name the operation it invokes ===')
+
+const svcClass = mock.register(new t.UMLClass(), 'PaymentService')
+const chargeOp = mock.register(new t.UMLOperation(), 'charge', svcClass, 'operations')
+mock.register(new t.UMLParameter(), 'amount', chargeOp, 'parameters')
+const sigInteraction = mock.register(new t.UMLInteraction(), 'Checkout')
+const sigMessage = mock.register(new t.UMLMessage(), 'charge', sigInteraction, 'messages')
+
+r = api.route('PUT', '/api/seq/messages/' + sigMessage._id, { signature: chargeOp._id })
+check('signature is settable through the same name the read side reports',
+    r.success === true && sigMessage.signature === chargeOp, r)
+check('and reads back with the operation name and parameter count',
+    r.data && r.data.signatureId === chargeOp._id && r.data.signatureName === 'charge' &&
+    r.data.signatureParameterCount === 1, r.data)
+
+r = api.route('PUT', '/api/seq/messages/' + sigMessage._id, { signatureId: svcClass._id })
+check('a class is refused: UML allows only an operation or a signal',
+    r.success === false && /UMLOperation or a UMLSignal/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/seq/messages/' + sigMessage._id, { signature: chargeOp._id, signatureId: chargeOp._id })
+check('the two spellings are mutually exclusive',
+    r.success === false && /two names for the same property/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/seq/messages/' + sigMessage._id, { arguments: 'amount', guard: 'amount > 0' })
+check('arguments and guard are settable',
+    r.success === true && sigMessage.arguments === 'amount' && sigMessage.guard === 'amount > 0', r)
+check('and read back',
+    r.data && r.data.arguments === 'amount' && r.data.guard === 'amount > 0', r.data)
+
+r = api.route('PUT', '/api/seq/messages/' + sigMessage._id, { signature: null })
+check('and the signature can be cleared',
+    r.success === true && sigMessage.signature === null, r)
+
+console.log('\n=== A-1: an association end can be moved without rebuilding the association ===')
+
+const gapClassDiagram = mock.register(new t.UMLClassDiagram(), 'Domain Model')
+const otherDiagram = mock.register(new t.UMLClassDiagram(), 'Overview')
+const oldTarget = mock.register(new t.UMLClass(), 'OldTarget')
+const newTarget = mock.register(new t.UMLClass(), 'NewTarget')
+const gapHolder = mock.register(new t.UMLClass(), 'Holder')
+
+function nodeViewFor(model, diagram, left, top) {
+    const v = new t.NodeView()
+    v.model = model
+    v.left = left
+    v.top = top
+    v.width = 100
+    v.height = 40
+    v._parent = diagram
+    diagram.ownedViews.push(v)
+    mock.store.push(v)
+    return v
+}
+
+const holderView = nodeViewFor(gapHolder, gapClassDiagram, 0, 0)
+const oldTargetView = nodeViewFor(oldTarget, gapClassDiagram, 300, 0)
+const newTargetView = nodeViewFor(newTarget, gapClassDiagram, 600, 0)
+nodeViewFor(gapHolder, otherDiagram, 0, 0)
+nodeViewFor(oldTarget, otherDiagram, 300, 0)
+// NewTarget is deliberately absent from otherDiagram.
+
+const movable = mock.register(new t.UMLAssociation(), 'owns')
+movable.end1 = mock.register(new t.UMLAssociationEnd(), '')
+movable.end2 = mock.register(new t.UMLAssociationEnd(), '')
+movable.end1.reference = gapHolder
+movable.end2.reference = oldTarget
+
+function assocViewOn(diagram, tail, head) {
+    const v = new t.UMLAssociationView()
+    v.model = movable
+    v.tail = tail
+    v.head = head
+    v._parent = diagram
+    v.points.add(new mock.Point(100, 20))
+    v.points.add(new mock.Point(300, 20))
+    diagram.ownedViews.push(v)
+    mock.store.push(v)
+    return v
+}
+const assocViewMain = assocViewOn(gapClassDiagram, holderView, oldTargetView)
+const assocViewOther = assocViewOn(otherDiagram, otherDiagram.ownedViews[0], otherDiagram.ownedViews[1])
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end2: { reference: newTarget._id } })
+check('end2.reference is accepted and written',
+    r.success === true && movable.end2.reference === newTarget, r)
+check('the view on a diagram that shows the new class is re-pointed',
+    assocViewMain.head === newTargetView, assocViewMain.head && assocViewMain.head._id)
+check('a diagram that does not show it is reported, not silently left wrong',
+    Array.isArray(r.ignored) && r.ignored.some(function (i) {
+        return /has no view on this diagram/.test(i.reason || '')
+    }), r.ignored)
+check('and that diagram still draws the old endpoint',
+    assocViewOther.head.model === oldTarget, assocViewOther.head.model.name)
+
+r = api.route('GET', '/api/class/associations/' + movable._id)
+check('the read side reports the new reference',
+    r.success && r.data.end2.reference === newTarget._id, r.data && r.data.end2)
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { reference: pkg._id } })
+check('an association end cannot be pointed at a package',
+    r.success === false && /UMLClassifier/.test(r.error || ''), r)
+check('and the end was left alone',
+    movable.end1.reference === gapHolder, movable.end1.reference && movable.end1.reference.name)
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { reference: 'no-such-id' } })
+check('a missing id is refused before anything is written',
+    r.success === false && /not found/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { multiplicity: '0..*', bogus: 'x' } })
+check('an unknown end field is still reported',
+    r.success === true && Array.isArray(r.ignored) &&
+    r.ignored.some(function (i) { return i.field === 'end1.bogus' }), r.ignored)
+check('and the settable list now includes reference',
+    r.ignored.some(function (i) { return /reference/.test(i.reason || '') }), r.ignored)
+
+console.log('\n=== A-2: an edge label takes a position in left/top ===')
+
+const labelEdge = assocViewMain
+const label = new t.EdgeLabelView()
+label.width = 60
+label.height = 13
+label.hostEdge = labelEdge
+label.edgePosition = 1
+label._parent = labelEdge
+labelEdge.subViews.push(label)
+mock.store.push(label)
+// Give the edge a path the label can hang off.
+labelEdge.points.clear()
+labelEdge.points.add(new mock.Point(100, 20))
+labelEdge.points.add(new mock.Point(700, 20))
+mock.app.diagrams._current = gapClassDiagram
+
+r = api.route('PUT', '/api/views/' + label._id, { left: 400, top: 120 })
+check('left/top on an edge label are accepted',
+    r.success === true, r)
+check('and StarUML\'s own arrange puts the label within a pixel of where it was asked',
+    Math.abs(label.left - 400) <= 1 && Math.abs(label.top - 120) <= 1,
+    { left: label.left, top: label.top })
+check('the polar pair the engine actually stores was written too',
+    label.distance > 0 && isFinite(label.alpha), { alpha: label.alpha, distance: label.distance })
+check('and the report never claims an exact write it did not make',
+    (r.ignored === undefined) &&
+    (Math.abs(label.left - 400) < 1e-6
+        ? /left/.test(r.message)
+        : (Array.isArray(r.clamped) && r.clamped.some(function (c) { return c.field === 'left' }))),
+    { message: r.message, clamped: r.clamped })
+
+r = api.route('PUT', '/api/views/' + label._id, { alpha: 0.5, distance: 40 })
+check('alpha/distance still work and re-derive left/top',
+    r.success === true && label.alpha === 0.5 && label.distance === 40, r)
+
+// getPointAwayLine branches on the signs of dx and dy, and getPolar has its own
+// flip for a negative dx. One horizontal edge exercises exactly one of those
+// paths, so a port error in any other branch would pass unnoticed. Drive the
+// label round every combination of edge direction and anchor end.
+const QUADRANTS = [
+    { name: 'down-right', a: [100, 20], b: [700, 420] },
+    { name: 'up-left', a: [700, 420], b: [100, 20] },
+    { name: 'down-left', a: [700, 20], b: [100, 420] },
+    { name: 'up-right', a: [100, 420], b: [700, 20] },
+    { name: 'vertical down', a: [400, 20], b: [400, 420] },
+    { name: 'vertical up', a: [400, 420], b: [400, 20] }
+]
+const ANCHORS = [
+    { name: 'EP_HEAD', value: 0 },
+    { name: 'EP_MIDDLE', value: 1 },
+    { name: 'EP_TAIL', value: 2 }
+]
+const roundTripMisses = []
+QUADRANTS.forEach(function (q) {
+    ANCHORS.forEach(function (anchor) {
+        labelEdge.points.clear()
+        labelEdge.points.add(new mock.Point(q.a[0], q.a[1]))
+        labelEdge.points.add(new mock.Point(q.b[0], q.b[1]))
+        label.edgePosition = anchor.value
+        const want = { left: 250, top: 260 }
+        const res = api.route('PUT', '/api/views/' + label._id, want)
+        if (!res.success) {
+            roundTripMisses.push(q.name + '/' + anchor.name + ': ' + res.error)
+            return
+        }
+        if (Math.abs(label.left - want.left) > 1 || Math.abs(label.top - want.top) > 1) {
+            roundTripMisses.push(q.name + '/' + anchor.name + ': landed at ' +
+                label.left + ',' + label.top)
+        }
+    })
+})
+check('the left/top round trip holds for every edge direction and anchor end (' +
+    (QUADRANTS.length * ANCHORS.length) + ' cases)',
+    roundTripMisses.length === 0, roundTripMisses.slice(0, 6))
+
+// Restore a simple horizontal edge for whatever runs after this.
+labelEdge.points.clear()
+labelEdge.points.add(new mock.Point(100, 20))
+labelEdge.points.add(new mock.Point(700, 20))
+label.edgePosition = 1
+
+const plainView = holderView
+r = api.route('PUT', '/api/views/' + plainView._id, { left: 15, top: 25 })
+check('a plain node view is unaffected by the parasitic path',
+    r.success === true && plainView.left === 15 && plainView.top === 25, r)
+
+console.log('\n=== A-4: undo says whether it undid anything ===')
+
+// Every write above pushed an operation, so the stack is not empty here.
+r = api.route('POST', '/api/undo')
+check('undo reports success while there is something to undo',
+    r.success === true && r.data && r.data.stackSizeAfter < r.data.stackSizeBefore, r)
+
+let guard = 0
+while (mock.app.repository._undoStack.size() > 0 && guard < 10000) {
+    mock.app.repository.undo()
+    guard += 1
+}
+r = api.route('POST', '/api/undo')
+check('and reports failure once the stack is empty, instead of "Undo executed"',
+    r.success === false && /Nothing to undo/.test(r.error || ''), r)
+
+r = api.route('POST', '/api/redo')
+check('redo answers the same way',
+    r.success === true && r.data && r.data.stackSizeAfter < r.data.stackSizeBefore, r)
+
+console.log('\n=== C-4: layout is refused on a sequence diagram ===')
+
+const seqForLayout = mock.register(new t.UMLSequenceDiagram(), 'Checkout SD')
+r = api.route('POST', '/api/diagrams/' + seqForLayout._id + '/layout', {})
+check('layout on a UMLSequenceDiagram is refused with the reason',
+    r.success === false && /destroy its arrangement/.test(r.error || ''), r)
+check('and points at the supported way to move a message',
+    /PUT \/api\/seq\/messages/.test(r.error || ''), r.error)
+
+r = api.route('POST', '/api/diagrams/' + gapClassDiagram._id + '/layout', {})
+check('a class diagram still lays out',
+    r.success === true, r)
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)
