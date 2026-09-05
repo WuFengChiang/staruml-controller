@@ -104,10 +104,10 @@ Select **Tools > StarUML Controller > Stop Server** from the menu bar.
 ## Write Reporting
 
 StarUML accepts a write and then silently changes or discards it: a view height
-below the content minimum is clamped, an edge label ignores `left`/`top`, a field
-whose target does not exist goes nowhere. A response that says `success: true` and
-`Updated ...` for such a write is misleading — and the mistake only surfaces on
-export.
+below the content minimum is clamped, a message dropped below the previous one is
+pushed back up, a field whose target does not exist goes nowhere. A response that
+says `success: true` and `Updated ...` for such a write is misleading — and the
+mistake only surfaces on export.
 
 Every create and update endpoint therefore compares each field before and after
 the write and classifies it:
@@ -145,10 +145,23 @@ classifier or a plain string. Two fields write it wherever it exists.
 |---|---|---|
 | `typeId` | an element id, or `null` to clear it | a reference to that classifier |
 | `typeName` | a bare type name | the string as given |
+| `type` | a bare type name | the same as `typeName` |
 
-The two are mutually exclusive. `typeId` is refused unless it names a
-UMLClassifier, and both are refused on an element with no type property at all,
-so a write is never reported as successful when the engine would discard it.
+They are mutually exclusive — sending two of them is refused rather than
+resolved by picking one. `typeId` is refused unless it names a UMLClassifier,
+and all three are refused on an element with no type property at all, so a write
+is never reported as successful when the engine would discard it.
+
+`type` exists on `PUT /api/elements/:id` because `POST .../attributes` has always
+taken that spelling, and the read side reports all three. One verification script
+wrote `typeName` through the family endpoint, read `type` back, found nothing,
+and reported 24 correct writes as failures. Whichever name you write, you can
+read the same value back under any of them.
+
+One place keeps the two apart on purpose. On
+`POST /api/elements/:id/children`, `type` names the element **class** to build
+(`UMLParameter`), while `typeName` and `typeId` name the type that element
+**has** (`Money`). No alias there — they mean different things.
 
 `PUT /api/elements/:id` takes them for any structural feature, and
 `POST /api/elements/:id/children` takes them while creating one — which is what
@@ -157,9 +170,17 @@ change it was to delete the attribute and build a replacement.
 
 Of the child types this API creates, these are structural features and accept a
 type: UMLAttribute, UMLParameter, UMLPort, UMLInputPin, UMLOutputPin,
-SysMLProperty and SysMLFlowProperty. UMLSlot is not one and has no type property,
-so it is refused with a message that says so rather than reporting a write that
-went nowhere.
+SysMLProperty and SysMLFlowProperty. UMLSlot is not one, so the write is refused
+with a message that says so rather than reporting a write that went nowhere.
+
+> **Correction, 2026-09-05.** This paragraph used to say UMLSlot "has no type
+> property". That is wrong: StarUML's metamodel gives UMLSlot a `type` of kind
+> `var` holding a UMLClassifier, alongside `definingFeature` and `value`. The
+> refusal is real, but its cause is the gate itself — the check asks whether the
+> element is a `UMLStructuralFeature`, and UMLSlot descends from
+> `UMLModelElement` instead. So this is an over-strict refusal, not an absent
+> property. Left as it is for now, and recorded here so the next reader does not
+> repeat the claim.
 
 An operation's return type is a parameter whose `direction` is `return`, so it
 takes one call:
@@ -257,6 +278,255 @@ is listed has no list of its own. Two types are excluded by name: C4Model, an
 auto-created container, and SysMLAbstractRequirement, an abstract base with no
 view.
 
+## Moving a Relation's Endpoint
+
+An association drawn to the wrong class used to mean deleting it and building a
+replacement. That changes the association's `_id`, and every view of it
+disappears with it — each diagram then has to be re-drawn and re-arranged by
+hand. Three such moves in one session cost three deletions, three rebuilds, four
+views re-created and a re-layout.
+
+`end1` and `end2` now take a `reference`, which is the id of the element that end
+should attach to:
+
+```bash
+curl -X PUT "http://localhost:12345/api/class/associations/$ASSOC_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"end2":{"reference":"'"$NEW_CLASS_ID"'"}}'
+```
+
+The association keeps its id and its views. `referenceId` is accepted as the same
+field under the other name; sending both is refused.
+
+Every view of the relation moves with the model. On a diagram that already shows
+the new element, the edge is re-pointed at it and its waypoints are cleared so it
+routes to the new position. A diagram that does **not** show the new element
+cannot be re-pointed — an edge view needs a node view on its own diagram to
+attach to — so that diagram keeps drawing the old endpoint and says so:
+
+```json
+{
+  "success": true,
+  "message": "Updated association (fields: end2.reference) — IGNORED: end2.view[Overview] ...",
+  "ignored": [{
+    "field": "end2.view[Overview]",
+    "requested": "NewTarget",
+    "reason": "\"NewTarget\" has no view on this diagram, so it still draws the old endpoint. Add a view of the new element to that diagram, then call PUT /api/views/<id>/reconnect"
+  }]
+}
+```
+
+The model is still correct in that case; only that one picture lags. Refusing the
+whole write instead would put you back to deleting and rebuilding, which is the
+cost this exists to remove.
+
+An association end is checked against UML, not just against the metamodel.
+StarUML declares `RelationshipEnd.reference` as a reference to any `Model`, so
+the engine would happily attach an association to a package. A `UMLAssociation`
+end is refused unless the target is a UMLClassifier.
+
+`PUT /api/views/:id/reconnect` still exists and does the same job from the view
+side, one diagram at a time. Use it when the two elements are already drawn and
+you only want that one picture changed.
+
+## Positioning an Edge Label
+
+An edge label — an association's name, its multiplicities, a message's text —
+stores no position of its own. StarUML recomputes `left` and `top` on every
+arrange pass from two numbers: `alpha`, the angle from an anchor on the host
+edge, and `distance`, the offset along it. Assigning `left`/`top` directly used
+to look accepted and was overwritten by the next repaint.
+
+`PUT /api/views/:id` now takes `left`/`top` on any parasitic view and converts
+them, using the same arithmetic a mouse drag uses:
+
+```bash
+curl -X PUT "http://localhost:12345/api/views/$LABEL_VIEW_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"left":900,"top":40}'
+```
+
+The request goes through StarUML's own `Engine.moveParasiticView`, which sets
+`alpha`/`distance`, draws the diagram so arrange recomputes `left`/`top`, and
+records all four as one undoable operation. The recomputed coordinates are
+therefore in the model — and in the `.mdj` after a save — without exporting an
+image to force a redraw.
+
+Arrange floors its arithmetic twice, so a requested `left` of 900 can settle at
+899. That one pixel is reported in `clamped`; it is never rounded away into a
+claim the write landed exactly.
+
+`alpha` and `distance` still work and are still the values StarUML stores. Note
+what that means for a hand-placed label: dragging one on the canvas writes
+`alpha`/`distance` too, so a hand position is not lost when the diagram is
+redrawn — but writing new ones through the API does replace it, exactly as a
+second drag would.
+
+If the label's diagram is not the one open in the editor, the draw happens on
+StarUML's hidden editor, so nothing the user is looking at changes.
+
+## Constraints
+
+A `UMLConstraint` shows its `specification` on the canvas, not its name — a
+constraint with no specification draws as an empty `{}`. `constrainedElements`
+names the elements the constraint is about, and it is the only part of a
+constraint a program can read; without it, a constraint says no more than a
+sticky note would.
+
+Both are writable through `PUT /api/elements/:id`, and both are refused on
+anything that is not a UMLConstraint:
+
+```bash
+curl -X POST "http://localhost:12345/api/elements/$CLASS_ID/children" \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"UMLConstraint","name":"paymentChoice","specification":"{xor}"}'
+
+curl -X PUT "http://localhost:12345/api/elements/$CONSTRAINT_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"constrainedElementIds":["'"$ASSOC_A"'","'"$ASSOC_B"'"]}'
+```
+
+`constrainedElementIds` replaces the whole list rather than appending to it, and
+every id is resolved before anything is written — a typo halfway down the list
+leaves the constraint as it was. The read side reports the list back as
+`constrainedElementIds` and `constrainedElementNames`.
+
+A constraint is written into the parent's `ownedElements`. There is no
+`constraints` collection on any UML class; the only one in StarUML's metamodel
+belongs to SysMLBlock and holds SysMLProperty. Asking for `field: "constraints"`
+on a UMLClass is now refused, with the collections that parent does have named in
+the message.
+
+## Pointing a Message at an Operation
+
+`UMLMessage.signature` is what connects a sequence diagram to a class diagram.
+UML 2.5.1 §17.12.18.7 expects the message name to match the operation name
+(`signature_refer_to`) and the argument count to match the parameter count
+(`signature_is_operation_request`). A model whose messages carry no signature has
+two unconnected pictures rather than one traceable design.
+
+```bash
+curl -X PUT "http://localhost:12345/api/seq/messages/$MSG_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"signature":"'"$OPERATION_ID"'","arguments":"orderId"}'
+```
+
+`signature` takes the id the read side already reports; `signatureId` is the same
+field under the other name. `null` clears it. The target must be a UMLOperation
+or a UMLSignal — that is UML's rule, and it is tighter than StarUML's metamodel,
+which would accept any model element. Pointing a message at a class satisfies no
+UML rule and would only look like traceability.
+
+Reading a message back reports `signatureName`, `signatureOwnerName` and
+`signatureParameterCount`, so the two UML rules above can be checked without
+fetching the operation.
+
+The other UMLMessage fields are writable in the same call: `arguments`, `guard`,
+`sequenceNumber`, `iteration`, `assignmentTarget` and `isConcurrentIteration`.
+
+One thing signature does **not** change: StarUML's Java and C# code generators
+read UMLOperation and UMLParameter, never `Message.signature`. Setting it
+restores traceability, not code generation.
+
+## Creating a Model Element Without a Diagram
+
+`POST /api/{family}/{resource}` creates a model element and a view together, so
+it makes you decide which diagram draws the element at the moment you create it.
+`POST /api/elements/:id/children` now takes classifiers and packages too, and
+creates the model element alone:
+
+```bash
+curl -X POST "http://localhost:12345/api/elements/$PACKAGE_ID/children" \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"UMLClass","name":"Receipt"}'
+```
+
+Add a view later with `POST /api/diagrams/:id/views`, on as many diagrams as you
+like or on none.
+
+The child goes into the collection named by `field`, defaulting to the one for
+its type. That default is checked against StarUML's metamodel, and the endpoint
+now refuses a `field` the parent does not carry. It used to accept one: the
+factory writes through `engine.addModel`, which does nothing when `parent[field]`
+is not an array, and then reads the element back out of the repository where it
+was never registered — so the response was `success: true` with `data: null` and
+nothing in the model. Two defaults were wrong that way (`UMLConstraint` and
+`UMLPort`), and one listed child type, `SysMLOperation`, is not a class in the
+metamodel at all and has been removed.
+
+`GET /api/status/capabilities` publishes `writableFields`, read from the same
+constants the handlers validate against, so what a build accepts can be looked up
+instead of discovered from a rejection.
+
+## Undo and Redo
+
+`POST /api/undo` used to answer `success: true` whether or not anything was
+undone. `Repository.undo()` checks its own stack and returns silently when it is
+empty, and StarUML exposes no `canUndo()`, so "Undo executed" was printed over a
+request that did nothing — which reads as "your change was reverted" when it was
+not.
+
+The stack depth is now read before and after. An empty stack is a failure with
+`Nothing to undo`, a stack that did not shrink is a failure naming the depth, and
+a successful undo reports how much history is left:
+
+```json
+{
+  "success": true,
+  "message": "Undo executed (12 operation(s) left to undo)",
+  "data": { "stackSizeBefore": 13, "stackSizeAfter": 12 }
+}
+```
+
+Writes made through this API do go on the undo stack: every one of them goes
+through `app.engine`, which builds an operation and hands it to
+`Repository.doOperation`. A write that appears not to undo is usually a write
+that never landed — check `ignored` in the original response.
+
+## Layout and Sequence Diagrams
+
+`POST /api/diagrams/:id/layout` is refused for a `UMLSequenceDiagram`, because
+running it destroys the arrangement. The reason is not a poor choice of layout
+algorithm — `UMLSequenceDiagram.layout()` is an empty stub, so no layout is
+attempted at all. The damage comes from `Engine.layoutDiagram`'s own bookkeeping:
+it snapshots `diagram.ownedViews[i]`, repaints, and then diffs
+`diagram.ownedViews[i]` against that snapshot. A sequence diagram reorders
+`ownedViews` during the repaint — `drawDiagram()` calls `regulateSequenceNumber()`
+on every message view — so by the time of the diff, index `i` is a different
+view, and each view is assigned another view's geometry.
+
+To move a message, write its `y`:
+
+```bash
+curl -X PUT "http://localhost:12345/api/seq/messages/$MSG_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"y":320}'
+```
+
+That is also what re-sorts the interaction's message list, which is the order a
+reader of the `.mdj` sees. Nothing but a draw of the diagram does that sorting,
+and a draw does not happen on its own after an API write, so the request now
+draws the diagram before answering and reports the resulting `messageIndex` and
+`messageCount`. Before, a moved message kept its old place in the list and the
+numbering on screen disagreed with the model.
+
+## The Server and Modal Dialogs
+
+The HTTP server runs on StarUML's renderer thread, the same thread that draws
+diagrams. A native modal dialog blocks that thread, and while one is open the
+server accepts connections and answers nothing — `GET /api/status` included.
+From a caller's side this is indistinguishable from a crash.
+
+There is no fix available from inside the extension: `app.dialogs.showErrorDialog`
+is `ipcRenderer.sendSync("show-error-box", ...)`, which blocks by design, and a
+dialog StarUML raises for its own reasons cannot be observed from here either. So
+the rule is that no request path raises one. The four dialog calls in this
+extension are all in `main.js`, on the start-server and stop-server menu
+commands, and none of them can be reached over HTTP.
+
+If every request times out while StarUML is running and idle, look at the screen:
+something is waiting for a button.
+
 ## API Endpoints
 
 ### General
@@ -265,10 +535,10 @@ view.
 |---|---|---|
 | `/api/status` | GET | Health check. Small payload: status, version, and the open project |
 | `/api/status/capabilities` | GET | Allowed type lists and the full endpoint list (~46 KB) |
-| `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element. PUT takes `name`, `stereotype`, `documentation`, `referenceId`, and for structural features `typeId`/`typeName`/`direction` |
+| `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element. PUT takes `name` (empty string clears it), `stereotype`, `documentation`, `referenceId`, for structural features `typeId`/`typeName`/`type`/`direction`, and for a UMLConstraint `specification`/`constrainedElementIds` |
 | `/api/elements/:id/tags` | GET / POST | List or create tags |
 | `/api/tags/:id` | GET / PUT / DELETE | Get, update, or delete tag |
-| `/api/elements/:id/children` | GET / POST | List or create child elements (attribute, operation, parameter, etc.). GET takes `?field=parameters` to list one container |
+| `/api/elements/:id/children` | GET / POST | List or create child elements — features, constraints, and now classifiers and packages with no view. GET takes `?field=parameters` to list one container. POST refuses a `field` the parent does not carry |
 | `/api/elements/:id/relationships` | GET | Get all relationships of an element |
 | `/api/elements/:id/views` | GET | Get all views of an element |
 | `/api/elements/:id/relocate` | PUT | Move element to a different parent |
@@ -278,7 +548,7 @@ view.
 | `/api/diagrams/:id/elements` | GET / POST | List or create node elements |
 | `/api/diagrams/:id/relations` | POST | Create relations |
 | `/api/diagrams/:id/export` | POST | Export diagram (PNG/JPEG/SVG/PDF) |
-| `/api/diagrams/:id/layout` | POST | Auto-layout diagram |
+| `/api/diagrams/:id/layout` | POST | Auto-layout diagram. Refused for a UMLSequenceDiagram — see *Layout and Sequence Diagrams* |
 | `/api/diagrams/:id/open` | POST | Open diagram in editor |
 | `/api/diagrams/:id/zoom` | PUT | Set zoom level |
 | `/api/diagrams/:id/create-view-of` | POST | Create view of existing model on diagram |
@@ -293,7 +563,7 @@ view.
 | `/api/shapes/:id` | GET / PUT / DELETE | Get, update, or delete shape |
 | `/api/diagrams/:id/views` | GET | List all views on diagram (top level only — use `/subviews` for nested) |
 | `/api/views/:id/subviews` | GET | List views nested inside a view (edge labels, state regions). `?recursive=true`, `?type=EdgeLabelView` |
-| `/api/views/:id` | PUT | Move/resize view (`left`, `top`, `width`, `height`); position an edge label (`alpha`, `distance`, `edgePosition`) |
+| `/api/views/:id` | PUT | Move/resize view (`left`, `top`, `width`, `height`). An edge label takes the same `left`/`top`, converted to the `alpha`/`distance`/`edgePosition` StarUML stores |
 | `/api/views/:id/style` | PUT | Update view style (fillColor, lineColor, autoResize, suppressAttributes, suppressOperations, etc.) |
 | `/api/views/:id/reconnect` | PUT | Reconnect edge to different source/target |
 | `/api/views/align` | POST | Align/distribute views |
@@ -305,8 +575,8 @@ view.
 | `/api/project/export` | POST | Export model fragment |
 | `/api/project/export-all` | POST | Export all diagrams as images |
 | `/api/project/export-doc` | POST | Export project as HTML/Markdown |
-| `/api/undo` | POST | Undo last operation |
-| `/api/redo` | POST | Redo last undone operation |
+| `/api/undo` | POST | Undo last operation. Fails with `Nothing to undo` on an empty stack, and reports the stack depth either way |
+| `/api/redo` | POST | Redo last undone operation, reported the same way as undo |
 | `/api/search` | GET | Search elements by keyword |
 | `/api/validate` | POST | Validate model integrity |
 | `/api/mermaid/import` | POST | Generate diagram from Mermaid syntax |
@@ -342,8 +612,8 @@ view.
 | `/api/seq/diagrams/:id` | GET / PUT / DELETE | Get, update, or delete sequence diagram |
 | `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines. POST takes `representTypeId`/`representTypeName` to set what the lifeline stands for |
 | `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline. PUT takes `representTypeId` (a classifier's id, or `null` to clear) or `representTypeName` (a bare type name) |
-| `/api/seq/interactions/:id/messages` | GET / POST | List or create messages |
-| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`; GET and PUT return the view geometry in `data.view` |
+| `/api/seq/interactions/:id/messages` | GET / POST | List or create messages. POST takes `signature` (the UMLOperation or UMLSignal the message invokes) and `arguments`, `guard`, `sequenceNumber`, `iteration`, `assignmentTarget`, `isConcurrentIteration` |
+| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `signature` and the other UMLMessage fields, plus `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`. GET and PUT return the view geometry in `data.view`, the message's place in the list as `messageIndex`, and the operation's name and parameter count when a signature is set |
 | `/api/seq/interactions/:id/combined-fragments` | GET / POST | List or create combined fragments |
 | `/api/seq/combined-fragments/:id` | GET / PUT / DELETE | Get, update, or delete combined fragment |
 | `/api/seq/combined-fragments/:id/operands` | GET / POST | List or add operands |
@@ -381,7 +651,7 @@ Each diagram family below provides dedicated CRUD endpoints with type-specific v
 | `/api/class/packages` | GET / POST | List or create packages |
 | `/api/class/packages/:id` | GET / PUT / DELETE | Get, update, or delete package |
 | `/api/class/associations` | GET / POST | List or create associations |
-| `/api/class/associations/:id` | GET / PUT / DELETE | Get, update, or delete association |
+| `/api/class/associations/:id` | GET / PUT / DELETE | Get, update, or delete association. PUT takes `end1`/`end2` with `name`, `navigable`, `aggregation`, `multiplicity` and `reference` — see *Moving a Relation's Endpoint* |
 | `/api/class/generalizations` | GET / POST | List or create generalizations |
 | `/api/class/generalizations/:id` | GET / PUT / DELETE | Get, update, or delete generalization |
 | `/api/class/dependencies` | GET / POST | List or create dependencies |
@@ -907,8 +1177,8 @@ curl -X POST http://localhost:12345/api/seq/combined-fragments/FRAGMENT_ID/opera
 ## Tests
 
 ```bash
-node test/test_offline_units.js      # no StarUML needed
-bash test/test_all_endpoints.sh      # needs StarUML running with the server started
+node test/test_offline_units.js       # no StarUML needed
+bash test/run_integration_safely.sh   # needs StarUML running with the server started
 ```
 
 The offline tests drive the same `route()` entry point against a mock runtime, so
@@ -916,6 +1186,24 @@ they can run while someone else has a model open — the integration script writ
 into whatever model is currently open, and there is only ever one. They cover
 routing, validation and serialization; anything about how StarUML's own engine
 behaves (clamping, view geometry, persistence) still needs the integration run.
+
+Two things the mock does model faithfully, because the controller's own
+arithmetic depends on them: StarUML's `Coord.getPointAwayLine` and
+`EdgeParasiticView.arrangeObject`, ported from `app.asar`. The controller writes
+the inverse of those, so a round trip through both is what shows the inverse is
+right.
+
+Run the integration suite through `run_integration_safely.sh`, never
+`test_all_endpoints.sh` directly. The runner switches to an empty project first
+and reopens the original from an EXIT trap, so a mid-run failure cannot leave
+someone's model dirty. It also refuses to start unless the build under test is
+loaded, which it checks by asking `GET /api/status/capabilities` whether
+`PUT /api/elements/:id` takes `specification`.
+
+Inside that run, `verify_gaps_live.py` does what a caller does to accept a fix:
+write, read back, save the project, and then `json.load` the `.mdj` and look for
+the field. A value that is only right in memory disappears at the next save, and
+nothing short of reading the file catches that.
 
 ## File Structure
 
