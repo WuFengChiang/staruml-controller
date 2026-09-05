@@ -1349,7 +1349,10 @@ function makeCreateRelation(config, rel) {
                         return
                     }
                     if (model[endName]) {
-                        applyEndFields(model[endName], body[endName], rel.endFields, report, endName)
+                        const endErr = applyEndFields(model[endName], body[endName], rel.endFields, report, endName, model)
+                        if (endErr) {
+                            h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined, endErr)
+                        }
                     } else {
                         h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
                             'the created ' + rel.type + ' has no ' + endName)
@@ -1403,7 +1406,144 @@ function makeCreateRelation(config, rel) {
     }
 }
 
-function applyEndFields(end, values, endFields, report, endName) {
+// The two spellings of "the classifier this end attaches to". serializeEnd
+// reports it as `reference`, so a caller that reads an association and writes
+// the same shape back must be able to use that name; `referenceId` matches the
+// xxxId convention the rest of the API uses for element references.
+const END_REFERENCE_FIELDS = ['reference', 'referenceId']
+
+/**
+ * Move one end of a relation to a different element, and move every view of
+ * that relation with it.
+ *
+ * Before this, the only way to change an association's endpoint was to delete
+ * the association and build a new one — which changes its _id and destroys
+ * every view of it, so each diagram had to be re-drawn and re-arranged by hand.
+ *
+ * StarUML's metamodel marks RelationshipEnd.reference `readOnly: true`, but that
+ * flag only hides the field in the property editor: Engine.setProperty does not
+ * check it, and Engine.reconnectEdge — the code behind dragging an endpoint on
+ * the canvas — writes end1.reference / end2.reference exactly this way.
+ *
+ * Returns an error string, or null when the write was attempted (the report
+ * says whether it took).
+ */
+function resolveEndReference(relation, endName, targetId, spelling) {
+    if (targetId === null) {
+        return { error: 'Field "' + endName + '.' + spelling + '" cannot be cleared: a relation end with no reference is not a valid model.' }
+    }
+    if (typeof targetId !== 'string' || targetId.trim() === '') {
+        return { error: 'Field "' + endName + '.' + spelling + '" must be the id of the element this end should attach to.' }
+    }
+    const target = h.findById(targetId)
+    if (!target) {
+        return { error: endName + '.' + spelling + ' not found: ' + targetId }
+    }
+    if (!(target instanceof type.Model)) {
+        return { error: endName + '.' + spelling + ' must refer to a model element. Got ' + target.constructor.name }
+    }
+    // An association between a class and a package is legal in the metamodel
+    // (the declared type is Model) and meaningless in UML.
+    if (relation instanceof type.UMLAssociation && !(target instanceof type.UMLClassifier)) {
+        return { error: endName + '.' + spelling + ' must refer to a UMLClassifier for a ' + relation.constructor.name +
+            ' (class, interface, data type, enumeration, signal, actor, use case, ...). Got ' + target.constructor.name }
+    }
+    return { target: target }
+}
+
+/**
+ * Which end reference spellings a body carries, and the errors they would
+ * cause. Lets a handler reject a bad id before it writes anything.
+ */
+function checkEndReferences(relation, body) {
+    const ends = ['end1', 'end2']
+    for (let i = 0; i < ends.length; i++) {
+        const endName = ends[i]
+        const values = body[endName]
+        if (!values || typeof values !== 'object') {
+            continue
+        }
+        const spelling = END_REFERENCE_FIELDS.filter(function (s) { return values[s] !== undefined })
+        if (spelling.length > 1) {
+            return 'Fields "' + endName + '.reference" and "' + endName + '.referenceId" are two names for the same property. Provide one of them.'
+        }
+        if (spelling.length === 1) {
+            const resolved = resolveEndReference(relation, endName, values[spelling[0]], spelling[0])
+            if (resolved.error) {
+                return resolved.error
+            }
+        }
+    }
+    return null
+}
+
+function applyEndReference(relation, end, endName, targetId, spelling, report) {
+    const resolved = resolveEndReference(relation, endName, targetId, spelling)
+    if (resolved.error) {
+        return resolved.error
+    }
+    h.applyProperty(report, end, 'reference', resolved.target, endName + '.reference')
+    repointRelationViews(relation, endName, resolved.target, report)
+    return null
+}
+
+/**
+ * Point every view of `relation` at the new endpoint.
+ *
+ * A diagram that does not already show the new element cannot be re-pointed —
+ * an edge view needs a node view on the same diagram to attach to. That diagram
+ * is reported as ignored and left drawing the old endpoint, rather than
+ * refusing the whole write: refusing would put the caller back to deleting and
+ * rebuilding the relation, which is the cost this exists to remove.
+ */
+function repointRelationViews(relation, endName, target, report) {
+    const isTail = endName === 'end1'
+    let views = []
+    try {
+        views = app.repository.getViewsOf(relation) || []
+    } catch (e) {
+        views = []
+    }
+    if (views.length === 0) {
+        return
+    }
+    const touchedDiagrams = []
+    views.forEach(function (edgeView) {
+        if (!edgeView || edgeView.tail === undefined || edgeView.head === undefined) {
+            return
+        }
+        const diagram = edgeView._parent
+        const diagramName = diagram ? (diagram.name || diagram._id) : '(unknown diagram)'
+        if (!diagram || !diagram.ownedViews) {
+            h.reportIgnoredWrite(report, endName + '.view[' + diagramName + ']', target.name || target._id, undefined,
+                'this view is not on a diagram')
+            return
+        }
+        const targetView = h.findViewOnDiagram(diagram, target._id)
+        if (!targetView) {
+            h.reportIgnoredWrite(report, endName + '.view[' + diagramName + ']', target.name || target._id, undefined,
+                '"' + (target.name || target._id) + '" has no view on this diagram, so it still draws the old endpoint. ' +
+                'Add a view of the new element to that diagram, then call PUT /api/views/' + edgeView._id + '/reconnect')
+            return
+        }
+        h.applyProperty(report, edgeView, isTail ? 'tail' : 'head', targetView,
+            endName + '.view[' + diagramName + '].' + (isTail ? 'tail' : 'head'))
+        h.clearEdgeWaypoints(edgeView)
+        if (touchedDiagrams.indexOf(diagram) === -1) {
+            touchedDiagrams.push(diagram)
+        }
+    })
+
+    // The edge now runs between different points, and its labels take their
+    // left/top from those points on the next arrange pass. Without a draw here,
+    // the model would be right and the label coordinates in the saved .mdj would
+    // still describe the old route.
+    touchedDiagrams.forEach(function (d) {
+        h.arrangeDiagram(d)
+    })
+}
+
+function applyEndFields(end, values, endFields, report, endName, relation) {
     const fields = endFields || ['name', 'navigable', 'aggregation', 'multiplicity']
     fields.forEach(function (f) {
         if (values[f] !== undefined) {
@@ -1414,16 +1554,38 @@ function applyEndFields(end, values, endFields, report, endName) {
             }
         }
     })
+
+    const spelling = END_REFERENCE_FIELDS.filter(function (s) { return values[s] !== undefined })
+    if (spelling.length > 1) {
+        if (report) {
+            h.reportIgnoredWrite(report, (endName || 'end') + '.reference', spelling.join(' + '), undefined,
+                '"reference" and "referenceId" are two names for the same property; provide one of them')
+        }
+    } else if (spelling.length === 1) {
+        if (!relation) {
+            if (report) {
+                h.reportIgnoredWrite(report, (endName || 'end') + '.' + spelling[0], values[spelling[0]], undefined,
+                    'this handler cannot resolve the relation the end belongs to')
+            }
+        } else {
+            const refErr = applyEndReference(relation, end, endName || 'end', values[spelling[0]], spelling[0], report)
+            if (refErr) {
+                return refErr
+            }
+        }
+    }
+
     // A field the caller sent that this relation's end does not accept would
     // otherwise vanish without a word.
     if (report) {
         Object.keys(values).forEach(function (f) {
-            if (fields.indexOf(f) === -1) {
+            if (fields.indexOf(f) === -1 && END_REFERENCE_FIELDS.indexOf(f) === -1) {
                 h.reportIgnoredWrite(report, (endName || 'end') + '.' + f, values[f], undefined,
-                    'not a settable field on this relation end; settable: ' + fields.join(', '))
+                    'not a settable field on this relation end; settable: ' + fields.concat(END_REFERENCE_FIELDS).join(', '))
             }
         })
     }
+    return null
 }
 
 function makeGetRelation(config, rel) {
@@ -1475,6 +1637,16 @@ function makeUpdateRelation(config, rel) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
+        // Resolve endpoint moves before writing anything: a bad id must not
+        // leave the relation half-moved, with one end rewritten and the other
+        // rejected.
+        if (rel.hasEnds) {
+            const endErr = checkEndReferences(elem, body)
+            if (endErr) {
+                return h.validationError(endErr, reqInfo, body)
+            }
+        }
+
         const report = h.createWriteReport()
         // Write to d.prop, not d.name: a field may expose a different parameter
         // name than the model property it sets. makeUpdateResource already does
@@ -1491,7 +1663,14 @@ function makeUpdateRelation(config, rel) {
                     return
                 }
                 if (elem[endName]) {
-                    applyEndFields(elem[endName], body[endName], rel.endFields, report, endName)
+                    // checkEndReferences ran first, so this cannot fail on a bad
+                    // reference. Report anything it does return rather than
+                    // dropping it — a silently discarded error is the failure
+                    // this whole endpoint is being fixed for.
+                    const endErr2 = applyEndFields(elem[endName], body[endName], rel.endFields, report, endName, elem)
+                    if (endErr2) {
+                        h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined, endErr2)
+                    }
                 } else {
                     h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
                         'this relation has no ' + endName + ' to write to')

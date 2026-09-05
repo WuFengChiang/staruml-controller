@@ -83,6 +83,16 @@ function serializeElement(elem) {
     if (elem.documentation) {
         result.documentation = elem.documentation
     }
+    // A UMLConstraint's canvas label is its specification, and the elements it
+    // constrains are the only machine-readable part of it. Reporting both here
+    // lets a caller read back what it wrote through PUT /api/elements/:id.
+    if (typeof elem.specification === 'string') {
+        result.specification = elem.specification
+    }
+    if (Array.isArray(elem.constrainedElements)) {
+        result.constrainedElementIds = elem.constrainedElements.map(function (c) { return c._id })
+        result.constrainedElementNames = elem.constrainedElements.map(function (c) { return c.name || '' })
+    }
     return result
 }
 
@@ -598,6 +608,88 @@ function clearEdgeWaypoints(edgeView) {
 }
 
 // ============================================================
+// Drawing
+// ============================================================
+
+// Several things only happen when StarUML draws a diagram, and a draw does not
+// happen on its own after an API write:
+//
+//   - a parasitic view's left/top are recomputed from alpha/distance
+//   - UMLSequenceDiagram.drawDiagram() calls regulateSequenceNumber() on every
+//     message view, which re-sorts interaction.messages by their y positions
+//
+// Whatever is in memory at save time is what lands in the .mdj, so a write that
+// changes either of those has to draw before it answers.
+
+function diagramOfView(view) {
+    if (!view) {
+        return null
+    }
+    if (typeof view.getDiagram === 'function') {
+        const d = view.getDiagram()
+        if (d) {
+            return d
+        }
+    }
+    let node = view
+    while (node) {
+        if (node.ownedViews) {
+            return node
+        }
+        node = node._parent
+    }
+    return null
+}
+
+/**
+ * The editor whose canvas will arrange `diagram`.
+ *
+ * The main editor only draws the diagram the user has open, so anything on
+ * another diagram would never be re-arranged. StarUML keeps a hidden editor for
+ * exactly this, and its own diagram-layout extension points that editor at a
+ * diagram and repaints before laying out. The main editor is never re-pointed —
+ * that would change what the user is looking at.
+ */
+function editorForDiagram(diagram) {
+    const main = app.diagrams && typeof app.diagrams.getEditor === 'function' ? app.diagrams.getEditor() : null
+    if (main && main.diagram === diagram) {
+        return main
+    }
+    const hidden = app.diagrams && typeof app.diagrams.getHiddenEditor === 'function' ? app.diagrams.getHiddenEditor() : null
+    if (hidden) {
+        hidden.diagram = diagram
+        // StarUML's layout extension repaints twice after re-pointing the hidden
+        // editor; the first pass settles view sizes, which the parasitic anchor
+        // geometry depends on.
+        if (typeof hidden.repaint === 'function') {
+            hidden.repaint()
+            hidden.repaint()
+        }
+        return hidden
+    }
+    return main
+}
+
+/**
+ * Draw `diagram` once. Best effort: returns true when a draw happened.
+ */
+function arrangeDiagram(diagram) {
+    if (!diagram) {
+        return false
+    }
+    try {
+        const editor = editorForDiagram(diagram)
+        if (editor && typeof editor.repaint === 'function') {
+            editor.repaint()
+            return true
+        }
+    } catch (e) {
+        // A draw is a convenience here, never the point of the request.
+    }
+    return false
+}
+
+// ============================================================
 // Exports
 // ============================================================
 
@@ -630,5 +722,9 @@ module.exports = {
     autoExpandFrame: autoExpandFrame,
     fitFrameToViews: fitFrameToViews,
     // Edge routing
-    clearEdgeWaypoints: clearEdgeWaypoints
+    clearEdgeWaypoints: clearEdgeWaypoints,
+    // Drawing
+    diagramOfView: diagramOfView,
+    editorForDiagram: editorForDiagram,
+    arrangeDiagram: arrangeDiagram
 }
