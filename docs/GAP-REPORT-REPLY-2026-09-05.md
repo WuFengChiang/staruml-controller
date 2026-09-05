@@ -219,7 +219,16 @@ curl -X POST "http://localhost:12345/api/elements/$PACKAGE_ID/children" \
 
 ### C-5　MCP schema 落後：機制跟你們想的不同
 
-先講結論：**這一項在另一個 repo，這一輪沒有動**。路徑是 `/Users/wuufone/Desktop/drawer/MyProjects/staruml-mcp-servers/`。
+先講結論：**已經改好並建置完成，但要重啟 MCP 客戶端才生效。** 那個 repo 在
+`/Users/wuufone/Desktop/drawer/MyProjects/staruml-mcp-servers/`，沒有版本控制，
+所以改了什麼記在
+`/Users/wuufone/Desktop/drawer/MyProjects/staruml-mcp-servers/staruml-controller-mcp-core/CHANGES-2026-09-05.md`。
+
+`seq_update_message` 現在收 `signature`，`element_update` 收 `specification` 與
+`constrainedElementIds`，`class_update_association` 收 `end1_reference` /
+`end2_reference`，`element_create_child` 收分類器型別與 `specification`。
+`npx tsc --noEmit` 乾淨、`npm run build` 成功、載入 `dist` 逐一檢查過產生的工具參數。
+每個 family 套件都是符號連結指回 core，所以只建置 core 就夠。
 
 但你們的推測要修正。落後的原因不是「要等伺服器重啟才跟上」，而是**那些 schema 是手寫的第二份副本**。那個 repo 的 `staruml-controller-mcp-core/src/tools/` 下面是一堆手寫的 TypeScript，把 controller 的欄位清單抄了一遍。例如 `/Users/wuufone/Desktop/drawer/MyProjects/staruml-mcp-servers/staruml-controller-mcp-core/src/tools/elements.ts` 裡的 `ALLOWED_CHILD_TYPES` 就是逐字複製，到現在還留著已經被我移除的 `SysMLOperation`。每個 family 的套件各自編譯出自己的 `dist`，MCP 客戶端載入的是編譯結果，不是原始碼。
 
@@ -240,7 +249,7 @@ curl -X POST "http://localhost:12345/api/elements/$PACKAGE_ID/children" \
 }
 ```
 
-MCP 那邊要不要改成從這裡產生，等你們回覆。**在那之前，這一輪新增的欄位只能走 HTTP，MCP 工具碰不到。**
+手抄副本會再次分歧這件事沒有根治。要根治就是把 schema 改成從 `writableFields` 產生，那是一個獨立專案，不在這一輪範圍內。
 
 ### D　伺服器沒有回應：機制查證屬實，同程序內無解
 
@@ -290,7 +299,7 @@ runner 現在也會先確認載入的是這一版：問 `GET /api/status/capabil
 ## 四、沒做的
 
 - **`diagram_create_view_of` 對泛化線回 `data: null`。** 你們提到它建成功了但回 null。這是 `createRelationView` 那條路徑，跟 A-3 的 `createChildElement` 不同，這一輪沒有動。要處理的話請單獨提，或告訴我這一條的優先序。
-- **MCP schema 同步。** 見 C-5，在另一個 repo，等你們決定。
+- **MCP schema 改成自動產生。** C-5 這一輪是手動補齊的，兩份副本會再次分歧的根因還在。
 - **`UMLSlot` 的型別設不了，而且拒絕的理由原本寫錯。** 這是我在核對 README 的時候發現的，不在你們的清單裡。`checkFeatureFieldsSupported` 用 `instanceof UMLStructuralFeature` 當閘門，而 `UMLSlot` 繼承自 `UMLModelElement`，所以被擋掉——但 metamodel 明明給了它一個 `type`（`kind: var`，`UMLClassifier`，idx 58817287）。也就是說這是過嚴的拒絕，不是欄位不存在。README 原本寫「UMLSlot has no type property」，已經訂正並留下訂正紀錄。行為本身沒有動，因為沒有人要求，而放寬會改變既有語意。要的話請開一條。
 - **實機驗證還沒跑。** 這一輪的所有結論分成兩層：程式碼機制的部分有 `app.asar` 的出處，是查證過的；「寫進去了而且存得下來」的部分只有離線測試撐著，**實機那一輪還沒跑**。跑 `run_integration_safely.sh` 需要 StarUML 開著、伺服器啟動、而且擴充功能重新載入成這一版。這件事得在你們這邊或我這邊實際做一次，做完我會把結果補進 `test/GAP-VERIFICATION.md`。在那之前，A-1 到 B-3 的實機行為請當成**待確認**。
 
