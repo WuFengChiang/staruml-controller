@@ -18,6 +18,21 @@ Run 5 is the clean one, and it is the run to quote for anything in this change
 set. Run 4 is kept because what it caught is worth keeping: the label defect,
 and the two suite cases that had been passing on a lie.
 
+**How run 5's build was identified.** The runner's own probe reads
+`writableFields` for `specification`, which both `7d26191` and `e5a403a`
+publish — it cannot tell run 4's build from run 5's. So the check was
+`GET /api/seq/messages/:id` on an existing message in the user's project:
+`messageIndex: 0, messageCount: 27` came back, and only `e5a403a` serves that
+field from a GET. Two of run 5's results are impossible on the older build for
+the same kind of reason — the exact 900/40 landing, and a message-order
+comparison that needs two readable indices to run at all.
+
+The runner now asks that question itself, in a step 2b that runs while the
+user's project is still open. No sequence message in the open project means it
+says so rather than guessing. **A build marker that has stopped discriminating
+is worse than none, because it still answers confidently** — the `specification`
+probe was that, for one run.
+
 Run 1's three failures were all faults in the check, not in the fix; they are
 fixed and run 2 covers what they were meant to.
 
@@ -127,11 +142,11 @@ by run 5" at the end of this section.
 
 > **This section was wrong when first written, in commit `473b6db` earlier the
 > same day.** It said the controller's inverse "skips the subtraction" of half
-> the label's width and height. It does not — the conversion is at
-> api-handler.js:5777 and always was. That claim came from reading the snapshot's
-> numbers and never opening the four lines that do the work. What follows
-> replaces it, and the fix follows from the corrected reading rather than the
-> original one.
+> the label's width and height. It does not — the conversion is the `const
+> centre` block in `moveParasiticGeometry`, and was there before any of this. The
+> claim came from reading the snapshot's numbers and never opening the four lines
+> that do the work. What follows replaces it, and the fix follows from the
+> corrected reading rather than the original one.
 
 The controller takes a requested `left`/`top`, converts it to the centre
 `arrangeObject` measures from, inverts StarUML's geometry to recover
@@ -164,9 +179,9 @@ The second line matches, `top` exactly and `left` within the one pixel the two
 `Math.floor` calls account for. The first is out by 34. Both A-2 failures are
 this one state — the second only reads the same pair back out of the `.mdj`.
 
-**The fix** (api-handler.js:5764) draws the diagram once before reading the
-size, and only when the size is missing, so a label that already has one behaves
-exactly as before. The anchor is now read after that draw, because a repaint can
+**The fix** is at the top of `moveParasiticGeometry`: draw the diagram once
+before reading the size, and only when the size is missing, so a label that
+already has one behaves exactly as before. The anchor is now read after that draw, because a repaint can
 move the host edge's points.
 
 That the draw is enough to produce a size is not an assumption. `repaint()` is
@@ -220,10 +235,11 @@ many as happened to be visible a moment earlier.
 
 ### C-4's ordering claim went unverified here, and holds in run 5
 
-`messageIndex` is attached in `createMessage` (api-handler.js:3840) and in
-`updateMessage` (api-handler.js:4118). `GET /api/seq/messages/:id` does not
-attach it. The check reads the moved message's index from the PUT response and
-the other message's from a GET, so it got `{"moved": 2, "other": null}` and had
+`messageIndex` was attached in `createMessage` and in `updateMessage` and
+nowhere else — lines 3840 and 4118 of `api-handler.js` as it stood at
+`7d26191`, the commit run 4 measured. `GET /api/seq/messages/:id` did not attach
+it. The check reads the moved message's index from the PUT response and the
+other message's from a GET, so it got `{"moved": 2, "other": null}` and had
 nothing to compare.
 
 C-4's central claim — that moving a message re-sorts `interaction.messages` —
@@ -278,7 +294,7 @@ back through the live engine. Gap checks 75/0, endpoint suite 428/0.
 
 | What | Change | Run 5 |
 |---|---|---|
-| A-2's missing size | api-handler.js:5764 draws once before reading `width`/`height`, and only when they are absent | 900/40 asked, 900/40 landed, and it survived the save. Offline, reverting the fix puts the same case at 365/113 |
+| A-2's missing size | `moveParasiticGeometry` draws once before reading `width`/`height`, and only when they are absent | 900/40 asked, 900/40 landed, and it survived the save. Offline, reverting the fix puts the same case at 365/113 |
 | C-4's unreadable index | `attachMessagePlace` serves `messageIndex` from GET as well as create and update, one function for all three | the ordering claim is now tested and holds: the message moved above the other one comes first in `interaction.messages` |
 | A-1's bound view count | the check asserts the `UMLAssociationView` survived and the count did not shrink, rather than an exact match | passes, with all eight A-1 checks green |
 | suite 138a/138b | a new `check_refused` helper expects the refusal and matches the reason | both refused, as they should be — which is what puts the suite back to 428/0 |

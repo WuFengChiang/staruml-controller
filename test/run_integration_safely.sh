@@ -79,6 +79,45 @@ case "$PROBE" in
         exit 1 ;;
 esac
 
+# The probe above stopped discriminating once a second build published
+# `specification`. It cannot tell the twelve gap-report fixes from the four
+# answers to run 4's failures, and a build marker that answers confidently
+# without discriminating is worse than none.
+#
+# So narrow it here, while the user's own project is still open: if it has a
+# sequence message, ask whether GET reports `messageIndex`. Only builds from
+# `e5a403a` onwards attach it on that route. Having no message to ask about is
+# not a failure — it just means this run cannot say which of the two it is.
+echo "== 2b. Which of the recent builds? =="
+case "$(python3 - "$BASE" <<'PY'
+import json, sys, urllib.parse, urllib.request
+B = sys.argv[1]
+def get(p):
+    try:
+        with urllib.request.urlopen(B + p, timeout=8) as r:
+            return json.load(r)
+    except Exception:
+        return {}
+enc = lambda s: urllib.parse.quote(s, safe='')
+for it in (get("/api/seq/interactions").get("data") or [])[:15]:
+    msgs = get("/api/seq/interactions/%s/messages" % enc(it["_id"])).get("data") or []
+    if msgs:
+        d = get("/api/seq/messages/%s" % enc(msgs[0]["_id"])).get("data") or {}
+        print("has-index" if d.get("messageIndex") is not None else "no-index")
+        break
+else:
+    print("no-messages")
+PY
+)" in
+    has-index)  echo "   GET reports messageIndex: the label-size and GET-index build." ;;
+    no-index)   echo "   WARNING: GET does not report messageIndex, so this is the build BEFORE"
+                echo "            the fixes for run 4's failures. A-2 will land half a label off"
+                echo "            and the message-order check cannot run. Quit StarUML, reopen it,"
+                echo "            start the server, then rerun." ;;
+    *)          echo "   no sequence message in the open project, so the build cannot be narrowed"
+                echo "   past the probe above. Read any A-2 or message-order result with that in mind." ;;
+esac
+
 if [ -z "$ORIGINAL" ]; then
     echo "NOTE: no file-backed project open; nothing to restore afterwards."
 fi
