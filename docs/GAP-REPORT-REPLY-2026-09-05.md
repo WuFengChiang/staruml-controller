@@ -1,7 +1,7 @@
 # 回覆 YC_POS_SYS 的 controller 缺口清單
 
 日期：2026-09-05　　回覆對象：YC_POS_SYS 那一側（來信說模型檔在你們的 `spec/佑全新POS.mdj`，我這邊沒有那個檔）
-本次改動的分支：`fix/gap-report-2026-09-05`。`da4d6d8` 到 `7d26191` 是十三條缺口的實作；`473b6db` 與 `1a766ed` 是實機跑過之後的修正與訂正。
+本次改動的分支：`fix/gap-report-2026-09-05`。`da4d6d8` 到 `7d26191` 是十三條缺口的實作，`473b6db` 之後是兩輪實機驗證帶出的修正與訂正。
 
 > **訂正（2026-09-05）**：這一行原本寫「分支 `integration/session-work`（尚未 commit）」。那是動筆當下的狀態，改動後來另開分支並 commit，這一行沒有跟著改。
 
@@ -75,7 +75,7 @@ curl -X PUT "http://localhost:12345/api/class/associations/$ASSOC_ID" \
 >
 > 這裡原本寫「反函式少算一次中心換左上角」。**那個歸因是錯的**，換算一直都在（`api-handler.js:5777`）。它缺的是尺寸：`View` 的建構式不指派 `width` 與 `height`，標籤要等 `LabelView.arrange` 用 canvas 量過文字才有尺寸。所以一個剛建立、還沒繪製的標籤沒有可用的寬度，`(view.width || 0)` 取 0，換算等於沒做，而 `arrangeObject` 減的是量測後的真實半寬。標籤的寬度就是它文字的寬度 —— 你們專案裡那些沒有名稱的關聯，標籤畫過無數次，`width` 仍然是 0。
 >
-> **已修**：寫 `left`／`top` 而尺寸還不存在時，先畫一次圖再讀尺寸。已經有尺寸的標籤走原本的路。**只有離線測試驗過，實機沒重跑。** 細節見第四節第三點與 `test/GAP-VERIFICATION.md` 的「Fixed after run 4」。下面的內容保留原樣，只在最後一段標出哪一句被推翻。
+> **已修，也驗過了**：寫 `left`／`top` 而尺寸還不存在時，先畫一次圖再讀尺寸。已經有尺寸的標籤走原本的路。同一個請求（900／40）在實機上從落在 866／34 變成**精確落在 900／40**，存檔之後也在。細節見第四節第三點與 `test/GAP-VERIFICATION.md` 的 Run 4、Run 5。下面的內容保留原樣，只在最後一段標出哪一句被推翻。
 
 一個邊標籤不存自己的位置。StarUML 每次重排都從 `alpha`（相對錨點的角度）與 `distance`（偏移量）重算 `left`／`top`，所以直接指派 `left`／`top` 才會被下一次重繪蓋掉。
 
@@ -227,7 +227,7 @@ curl -X POST "http://localhost:12345/api/elements/$PACKAGE_ID/children" \
 
 現在 `PUT /api/seq/messages/:id` 寫完 `y` 之後會畫一次圖，回應也帶上 `messageIndex` 與 `messageCount`。建立訊息時也一樣。所以不用再一步一步 `element_reorder` 了。
 
-`GET /api/seq/messages/:id` 也會回報這兩個欄位（2026-09-05 補上，在那之前只有建立與更新會回）。至於「重新排序」這件事本身，實機還沒驗到，理由見第四節第三點。
+`GET /api/seq/messages/:id` 也會回報這兩個欄位（2026-09-05 補上，在那之前只有建立與更新會回）。「重新排序」這件事本身也實機驗過了：把一則訊息移到另一則上面，它在 `interaction.messages` 裡就排到前面。
 
 ### C-5　MCP schema 落後：機制跟你們想的不同
 
@@ -310,7 +310,7 @@ runner 現在也會先確認載入的是這一版：問 `GET /api/status/capabil
 
 那兩項用 `POST /api/elements/:id/children` 在 UMLAction 底下建 `UMLInputPin` 與 `UMLOutputPin`。StarUML 的 `registerModelFn` 註冊了 90 個型別，其中沒有任何一個帶 Pin，所以 `app.factory.createModel` 對這兩個型別一直都回 null —— 這不是這一輪造成的，一直如此。A-3 新增的 null 檢查只是把它如實回報成失敗。在那之前 controller 回的是 `success: true`，還交出一個 repository 從來沒登記過的元素；而套件的 `check()` 只讀 `success`，所以這個謊撐多久，這兩項就通過多久。
 
-也就是說 **426／2 才是這一版正確的成績**，套件對這兩項的預期要反過來寫。實機那一輪的完整結果見下一節與 `test/GAP-VERIFICATION.md` 的 Run 4。
+套件對這兩項的預期因此反過來寫了：新增一個「預期被拒」的檢查函式，伺服器說不、而且理由對得上，才算通過。第二輪套件回到 **428 過 0 敗** —— 跟這一輪之前同一個數字，但裡面不再有那兩個謊報的成功。完整結果見下一節與 `test/GAP-VERIFICATION.md` 的 Run 4、Run 5。
 
 ---
 
@@ -319,15 +319,15 @@ runner 現在也會先確認載入的是這一版：問 `GET /api/status/capabil
 - **`diagram_create_view_of` 對泛化線回 `data: null`。** 你們提到它建成功了但回 null。這是 `createRelationView` 那條路徑，跟 A-3 的 `createChildElement` 不同，這一輪沒有動。要處理的話請單獨提，或告訴我這一條的優先序。
 - **MCP schema 改成自動產生。** C-5 這一輪是手動補齊的，兩份副本會再次分歧的根因還在。
 - **`UMLSlot` 的型別設不了，而且拒絕的理由原本寫錯。** 這是我在核對 README 的時候發現的，不在你們的清單裡。`checkFeatureFieldsSupported` 用 `instanceof UMLStructuralFeature` 當閘門，而 `UMLSlot` 繼承自 `UMLModelElement`，所以被擋掉——但 metamodel 明明給了它一個 `type`（`kind: var`，`UMLClassifier`，idx 58817287）。也就是說這是過嚴的拒絕，不是欄位不存在。README 原本寫「UMLSlot has no type property」，已經訂正並留下訂正紀錄。行為本身沒有動，因為沒有人要求，而放寬會改變既有語意。要的話請開一條。
-- **實機驗證跑完了，其中 A-2 沒過。** 2026-09-05 在 StarUML 6 上跑 `run_integration_safely.sh`：缺口檢查 71 過 4 敗，端點套件 426 過 2 敗，另有 2 項因為前置條件不足略過。逐項歸因與證據記在 `test/GAP-VERIFICATION.md` 的 Run 4。四個缺口失敗分成三種：
+- **實機驗證跑完了，跑了兩輪，第二輪全過。** 2026-09-05 在 StarUML 6 上跑 `run_integration_safely.sh`。第一輪（`7d26191`）缺口檢查 71 過 4 敗、端點套件 426 過 2 敗；四個失敗當天修完，第二輪（`e5a403a`）缺口檢查 75 過 0 敗、端點套件 428 過 0 敗。兩輪都另有 2 項因為前置條件不足略過（缺 BPMN 起始事件與連結物件，與這一輪無關）。逐項歸因與證據記在 `test/GAP-VERIFICATION.md` 的 Run 4 與 Run 5。第一輪那四個缺口失敗分成三種：
 
-  - **A-2 是真的缺陷，已修，但只有離線測試驗過。** 標籤的 left／top 要求 900／40，實機落在 866／34，差的是半個標籤。原因不是換算寫錯，是換算當下沒有尺寸可用：`View` 的建構式不指派 `width`／`height`，標籤要等 `LabelView.arrange` 用 canvas 量過文字才有尺寸，所以剛建立的標籤 `view.width` 是 undefined，換算取 0 等於沒做。修法是尺寸還不存在時先畫一次圖再讀。離線測試新增一個「從未繪製過的標籤」案例，把修正拿掉就會落在 365／113，放回去就命中。**實機沒有重跑，這一條的實機行為是待確認。**
-  - **C-4 的順序主張沒驗到，仍是待確認。** `messageIndex` 原本只有 `POST` 與 `PUT` 的回應會帶，`GET /api/seq/messages/:id` 不帶（README 卻寫它會帶，檢查是照 README 寫的），所以檢查讀不到第二則訊息的位置，無從比對。GET 現在也會回報了，三條路徑共用同一個函式；但檢查沒有重跑，所以「移動訊息會重排 `interaction.messages`」這一條還是沒有實機證據。
-  - **另外兩個失敗是檢查寫得太嚴，不是修正有問題。** 一條關聯在圖上本來就是 4 個 view（1 條線加 3 個標籤），檢查卻把數量綁死在「搬動端點前讀到的那個數」，而那一次讀在標籤進入索引之前。你們專案裡一條沒被動過的關聯，同樣回 4 個。A-1 的其他四項全過。斷言已改成驗「那條 `UMLAssociationView` 還在」。
+  - **A-2 是真的缺陷，已修，也驗過了。** 標籤的 left／top 要求 900／40，第一輪落在 866／34，差的是半個標籤。原因不是換算寫錯，是換算當下沒有尺寸可用：`View` 的建構式不指派 `width`／`height`，標籤要等 `LabelView.arrange` 用 canvas 量過文字才有尺寸，所以剛建立的標籤沒有可用的寬度，`(view.width || 0)` 取 0，換算等於沒做。修法是尺寸還不存在時先畫一次圖再讀。第二輪同一個請求**精確落在 900／40**，存檔之後也在。離線測試新增一個「從未繪製過的標籤」案例，把修正拿掉就落在 365／113。
+  - **C-4 的順序主張，第二輪驗到了，成立。** `messageIndex` 原本只有 `POST` 與 `PUT` 的回應會帶，`GET /api/seq/messages/:id` 不帶（README 卻寫它會帶，檢查是照 README 寫的），所以第一輪的檢查讀不到第二則訊息的位置，無從比對。GET 現在也會回報，三條路徑共用同一個函式。檢查因此跑得起來，結果是**移到上面的訊息確實在 `interaction.messages` 裡排到前面** —— 「寫入時畫一次圖」真的就是重排清單的那個動作。
+  - **另外兩個失敗是檢查寫得太嚴，不是修正有問題。** 一條關聯在圖上本來就是 4 個 view（1 條線加 3 個標籤），檢查卻把數量綁死在「搬動端點前讀到的那個數」，而那一次讀在標籤進入索引之前。你們專案裡一條沒被動過的關聯，同樣回 4 個。斷言改成驗「那條 `UMLAssociationView` 還在」，第二輪 A-1 八項全過。
 
-  其餘全部通過：原本的七條缺口、既有屬性改型別、A-1 的四項、A-3、A-4、B-1、B-2、B-3、C-1、C-2、C-3，以及 C-4 擋掉循序圖 layout 的那一項。
+  第一輪其餘全部通過：原本的七條缺口、既有屬性改型別、A-3、A-4、B-1、B-2、B-3、C-1、C-2、C-3，以及 C-4 擋掉循序圖 layout 的那一項。
 
-  **這一輪修完之後的狀態**：離線測試 137 過 0 敗。上面四個失敗都動過了（A-2 補畫圖、GET 補 `messageIndex`、A-1 斷言放寬、套件對 138a／138b 改成預期被拒），但**沒有任何一項回到實機驗過**。要在你們那邊或我這邊再跑一趟 `run_integration_safely.sh` 才算完。
+  **第二輪（修完之後）**：缺口檢查 **75 過 0 敗**，端點套件 **428 過 0 敗**，離線測試 137 過 0 敗。428／0 跟這一輪之前的成績數字相同，但這一次裡面沒有那兩個謊報的成功 —— 138a／138b 現在是「如預期被拒」才算通過。兩輪的完整紀錄在 `test/GAP-VERIFICATION.md`。
 
 ---
 
@@ -388,7 +388,7 @@ UML 2.5.1 §17.12.18.7 的 `signature_refer_to` 與 `signature_is_operation_requ
 
 ### 待確認
 
-- 「移動訊息會重排 `interaction.messages`」（C-4）。實機跑過但沒驗到，原因見第四節第三點。
 - `diagram_create_view_of` 回 `data: null` 的原因（未探測）。
+- `clamped` 在 A-2 還有缺陷的那一輪，有沒有把那 34 像素報出來（沒有檢查，缺陷已修，這一題不會再出現）。
 
-> **訂正（2026-09-05）**：這一節原本第一條是「這一輪所有改動的實機行為（見第四節第三點）」。實機那一輪跑完之後，多數項目不再是待確認，只剩 C-4 的順序主張沒有證據。第一手結果見 `test/GAP-VERIFICATION.md` 的 Run 4。
+> **訂正（2026-09-05，改過兩次）**：這一節原本第一條是「這一輪所有改動的實機行為（見第四節第三點）」。第一輪實機跑完之後只剩 C-4 的順序主張沒有證據；第二輪把它驗掉了，所以這一條也拿掉。第一手結果見 `test/GAP-VERIFICATION.md` 的 Run 4 與 Run 5。

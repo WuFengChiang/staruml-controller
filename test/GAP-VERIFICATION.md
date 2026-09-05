@@ -4,7 +4,7 @@ Measured against StarUML 6 with the extension reloaded, on an empty scratch
 project. Recorded here because the numbers are easy to lose and easy to
 misquote: each row below says which layer produced it.
 
-Four runs, each against different code:
+Five runs, each against different code:
 
 | # | Date | Build | Gap checks | Endpoint suite |
 |---|---|---|---|---|
@@ -12,9 +12,11 @@ Four runs, each against different code:
 | 2 | 2026-09-01 | plus the six review findings | 29 / 0 | **aborted** |
 | 3 | 2026-09-01 | plus the serializer fix run 2 exposed | 29 / 0 | 428 / 0 |
 | 4 | 2026-09-05 | plus the twelve A/B/C gap-report fixes, at commit `7d26191` | 71 pass, 4 fail | 426 / 2, 2 skipped |
+| 5 | 2026-09-05 | plus the four answers to run 4's failures, at commit `e5a403a` | 75 / 0 | 428 / 0, 2 skipped |
 
-The commits after `7d26191` have no live run at all. They answer run 4's
-failures, and what they are is in "Fixed after run 4" below.
+Run 5 is the clean one, and it is the run to quote for anything in this change
+set. Run 4 is kept because what it caught is worth keeping: the label defect,
+and the two suite cases that had been passing on a lie.
 
 Run 1's three failures were all faults in the check, not in the fix; they are
 fixed and run 2 covers what they were meant to.
@@ -38,7 +40,7 @@ has its own section further down.
 |---|---|---|---|
 | Offline units | `node test/test_offline_units.js` | the controller's own logic | whether StarUML keeps what was written — the mock assigns properties straight through, so it can never produce an `ignored` result |
 | Live gap checks | `test/verify_gaps_live.py`, via the runner | what the engine did with the write, read back on a second call | only the seven gaps it was written for |
-| Endpoint suite | `test/test_all_endpoints.sh`, via the runner | nothing regressed | nothing about correctness — `check()` reads `success` and no value |
+| Endpoint suite | `test/test_all_endpoints.sh`, via the runner | nothing regressed | nothing about correctness — `check()` reads `success` and no value. `check_refused()`, added for 138a/138b, is the one exception: it reads the error too |
 
 Run the last two only through `bash test/run_integration_safely.sh`. It parks the
 open project, switches to an empty one, and reopens the original from an EXIT
@@ -117,9 +119,9 @@ and two of the six are a real defect in this build.
 Two suite cases were skipped for want of a BPMN start event and a link object.
 Neither is related to this change set.
 
-The verdicts above are what run 4 measured. All six have since been acted on —
-see "Fixed after run 4" at the end of this section for what changed and what
-that leaves unproven.
+The verdicts above are what run 4 measured. All six were acted on the same day
+and run 5 came back clean on every one — see "Fixed after run 4, and confirmed
+by run 5" at the end of this section.
 
 ### A-2 converts left/top with a size the label does not have yet
 
@@ -176,9 +178,11 @@ this run's own snapshot is that measurement, taken during the repaint
 `moveParasiticView` is handed. Same editor, same draw, same measurement — only
 early enough to convert with.
 
-What is still unproven is narrower: **no live run has confirmed the label now
-lands on the request.** The mechanism is accounted for; the round trip through
-the real engine is not.
+**Run 5 confirms it.** The same check, same label, same request: `left: 900,
+top: 40` landed on 900/40 exactly, with the label measuring 70.21 x 13 in the
+snapshot. Not within a pixel — on it. The two `Math.floor` calls have a pixel to
+give and did not need it, because the conversion and the arrangement now round
+the same number in opposite directions.
 
 **Why the offline tests could not see it.** Not because the mock is wrong:
 `test/mock-staruml.js` copies `arrangeObject` faithfully, half-width subtraction
@@ -214,7 +218,7 @@ cannot be pointed at a package — all passed. Nothing about A-1 is broken. The
 assertion should say the views survived, not that there are still exactly as
 many as happened to be visible a moment earlier.
 
-### C-4's ordering claim is still unverified
+### C-4's ordering claim went unverified here, and holds in run 5
 
 `messageIndex` is attached in `createMessage` (api-handler.js:3840) and in
 `updateMessage` (api-handler.js:4118). `GET /api/seq/messages/:id` does not
@@ -229,9 +233,14 @@ the create call reports an index and that the move is accepted.
 The check was not careless: README's endpoint table said `GET` returned
 `messageIndex` alongside `PUT`, and the check was written against that sentence.
 The documentation was wrong, and this run is what caught it — that line is now
-corrected, in the table and in the "Moving a Message" section above it. Serving
-`messageIndex` from the GET route would close the same gap from the other side,
-and let the check do its job.
+corrected, in the table and in the "Moving a Message" section above it. The GET
+route serves `messageIndex` as well, from the same `attachMessagePlace` the
+other two use, which closed the gap from both sides.
+
+**Run 5 then tested the claim itself, and it holds.** A message moved above
+another one comes first in `interaction.messages` — so the draw a write now
+performs really is what re-sorts the list, and the numbering on screen agrees
+with the model.
 
 ### The two suite failures are the fix, not a regression
 
@@ -250,8 +259,11 @@ and handed back an element the repository had never registered. `check()` in the
 suite reads `success` and nothing else, so the suite scored them as passes for
 as long as the lie held.
 
-**The suite's expectation for 138a/138b is now wrong and should be inverted.**
-Until it is, 426/2 is the passing score for this build.
+**The suite's expectation for 138a/138b was wrong, and is now inverted.** A
+`check_refused` helper takes the two cases: it passes when the server says no
+*and* the reason matches, so a refusal for some other cause still fails. That is
+what puts run 5 back to 428/0 — the same score as run 3, this time without the
+two lies in it.
 
 This also corrects a claim in `docs/GAP-REPORT-REPLY-2026-09-05.md`, which
 compared the change set against the suite statically and concluded the suite
@@ -259,22 +271,20 @@ would not be disturbed. That comparison walked the four behaviours the change
 set altered on purpose, and never asked which previously-passing cases the new
 null check would flip. Two of them flipped.
 
-### Fixed after run 4
+### Fixed after run 4, and confirmed by run 5
 
-All six failures were acted on the same day. **None of it has been back through
-the live engine** — the offline suite is 137/0 with these changes, and that is
-the whole of the evidence.
+All six failures were acted on the same day, and run 5 put every one of them
+back through the live engine. Gap checks 75/0, endpoint suite 428/0.
 
-| What | Change | How far it is proven |
+| What | Change | Run 5 |
 |---|---|---|
-| A-2's missing size | api-handler.js:5764 draws once before reading `width`/`height`, and only when they are absent | offline: a never-drawn label now lands on the request, and fails at 365/113 with the fix reverted. The draw does measure — same editor and same `drawDiagram` that produced the 70.21 in run 4's snapshot — but no live run has watched the label land |
-| C-4's unreadable index | `attachMessagePlace` serves `messageIndex` from GET as well as create and update, one function for all three | offline suite unaffected; the ordering claim itself still needs a live run |
-| A-1's bound view count | the check asserts the `UMLAssociationView` survived and the count did not shrink, rather than an exact match | not re-run |
-| suite 138a/138b | a new `check_refused` helper expects the refusal and matches the reason | not re-run |
+| A-2's missing size | api-handler.js:5764 draws once before reading `width`/`height`, and only when they are absent | 900/40 asked, 900/40 landed, and it survived the save. Offline, reverting the fix puts the same case at 365/113 |
+| C-4's unreadable index | `attachMessagePlace` serves `messageIndex` from GET as well as create and update, one function for all three | the ordering claim is now tested and holds: the message moved above the other one comes first in `interaction.messages` |
+| A-1's bound view count | the check asserts the `UMLAssociationView` survived and the count did not shrink, rather than an exact match | passes, with all eight A-1 checks green |
+| suite 138a/138b | a new `check_refused` helper expects the refusal and matches the reason | both refused, as they should be — which is what puts the suite back to 428/0 |
 
-What a live run would still settle: whether A-2 now lands within the one pixel
-the floors allow, and whether the interaction's message list really does
-re-sort. Until then, treat both as offline-only.
+Two suite cases were skipped again, for the same missing BPMN start event and
+link object as in run 4. Nothing in this change set touches either.
 
 ## Not covered
 
@@ -285,13 +295,9 @@ re-sort. Until then, treat both as offline-only.
   back. Five of the nine are creatable through this API, so that check is
   writable; the other four are not, and would need a model built in the GUI.
 
-- **C-4's message reordering.** Run 4 accepted the move but could not read the
-  second message's position back, so nothing has yet shown that the interaction's
-  message list re-sorts. See "C-4's ordering claim is still unverified" above.
-
-- **A-2's label placement, now that it is corrected.** The fix is in and the
-  offline suite covers the state that produced the failure, but no live run has
-  confirmed a never-drawn label lands on its request against the real engine.
+Two entries stood here between runs 4 and 5 — C-4's message reordering and
+A-2's label placement — and run 5 covered both. What it measured is in "Fixed
+after run 4, and confirmed by run 5" above.
 
 ## Known, not addressed
 

@@ -368,11 +368,12 @@ claim the write landed exactly.
 > conversion took it as zero and moved the point nowhere, and arrange then
 > subtracted the real half-width the request had never accounted for.
 >
-> **Fixed.** A `left`/`top` request on a view with no measured size now draws the
-> diagram first, so the size is the one arrange is about to use. A label that
-> already has a size is untouched by this. Verified offline only — see "Fixed
-> after run 4" in `test/GAP-VERIFICATION.md`. Whether `clamped` reported the
-> 34-pixel gap was never checked.
+> **Fixed and verified.** A `left`/`top` request on a view with no measured size
+> now draws the diagram first, so the size is the one arrange is about to use. A
+> label that already has a size is untouched by this. On the live engine the same
+> request that landed at 866/34 now lands at 900/40 exactly, and survives the
+> save — see runs 4 and 5 in `test/GAP-VERIFICATION.md`. Whether `clamped`
+> reported the 34-pixel gap while the defect stood was never checked.
 
 `alpha` and `distance` still work and are still the values StarUML stores. Note
 what that means for a hand-placed label: dragging one on the canvas writes
@@ -535,10 +536,9 @@ numbering on screen disagreed with the model.
 > and the other's from a GET that answered `null`, and had nothing to compare.
 >
 > The GET route now serves it too, from the same `attachMessagePlace` the other
-> two use. But the check has not been re-run, so the re-sorting claim in this
-> section is **still unverified against the live engine**: the write is accepted
-> and reports an index, and no run has yet confirmed the list order changed. See
-> "Run 4" in `test/GAP-VERIFICATION.md`.
+> two use. With that in place the check could finally run, and **the re-sorting
+> claim in this section holds**: a message moved above another one comes first in
+> `interaction.messages`. See runs 4 and 5 in `test/GAP-VERIFICATION.md`.
 
 ## The Server and Modal Dialogs
 
