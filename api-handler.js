@@ -10,7 +10,8 @@ const crudFactory = require('./handlers/crud-factory')
 const {
     autoExpandFrame, fitFrameToViews, clearEdgeWaypoints,
     createWriteReport, applyProperty, reportIgnoredWrite,
-    writeReportMessage, appendWriteWarnings, attachWriteReport, writeValuesEqual
+    writeReportMessage, appendWriteWarnings, attachWriteReport, writeValuesEqual,
+    diagramOfView, editorForDiagram, arrangeDiagram
 } = require('./handlers/shared-helpers')
 
 // ============================================================
@@ -247,7 +248,16 @@ const ALLOWED_CHILD_TYPES = [
     'UMLPort', 'UMLReception', 'UMLExtensionPoint', 'UMLSlot',
     'UMLTemplateParameter', 'UMLRegion', 'UMLConstraint',
     'UMLInteractionOperand',
-    'SysMLProperty', 'SysMLOperation', 'SysMLFlowProperty',
+    // Classifiers and packages, so a model element can be created without also
+    // deciding which diagram draws it. POST /api/elements/:id creates a model
+    // AND a view, which forces that decision at creation time; these go into
+    // the parent's ownedElements with no view at all. Add a view later with
+    // POST /api/diagrams/:id/views.
+    'UMLClass', 'UMLInterface', 'UMLEnumeration', 'UMLDataType',
+    'UMLPrimitiveType', 'UMLSignal', 'UMLActor', 'UMLUseCase',
+    'UMLComponent', 'UMLNode', 'UMLArtifact', 'UMLCollaboration',
+    'UMLPackage', 'UMLModel', 'UMLSubsystem',
+    'SysMLProperty', 'SysMLFlowProperty', 'SysMLPort',
     'UMLInputPin', 'UMLOutputPin',
     // Trigger events on transitions (UMLTransition.triggers) and actions (UMLAction.triggers)
     'UMLEvent',
@@ -259,21 +269,58 @@ const ALLOWED_CHILD_TYPES = [
     'BPMNTerminateEventDefinition', 'BPMNConditionalEventDefinition'
 ]
 
+// Which collection on the parent each child type is created into.
+//
+// Every entry here is checked against StarUML's own metamodel (the class
+// definitions inside app.asar): the named field must be declared somewhere as
+// an `objs`/`refs` collection whose element type the child type descends from.
+// Three entries used to fail that check and wrote nowhere:
+//
+//   UMLConstraint -> 'constraints'  no UML class declares `constraints`; the
+//                                   only one in the metamodel is SysMLBlock's,
+//                                   and it holds SysMLProperty. A UMLConstraint
+//                                   belongs in the generic `ownedElements`.
+//   UMLPort       -> 'ports'        same: `ports` is SysMLBlock's and holds
+//                                   SysMLPort. UMLPort descends from
+//                                   UMLAttribute, so it goes in `attributes`.
+//   SysMLOperation                  not a class in the metamodel at all.
+//                                   Removed from ALLOWED_CHILD_TYPES.
+//
+// A wrong field here is silent: Factory.defaultModelFn calls
+// engine.addModel(parent, field, model), which does nothing when parent[field]
+// is not an array, and then reads the model back out of the repository — where
+// it was never registered. The caller gets data: null and an empty model.
+// createChildElement now rejects such a field before creating anything.
 const CHILD_TYPE_DEFAULT_FIELDS = {
     'UMLAttribute': 'attributes',
     'UMLOperation': 'operations',
     'UMLParameter': 'parameters',
     'UMLEnumerationLiteral': 'literals',
-    'UMLPort': 'ports',
+    'UMLPort': 'attributes',
     'UMLReception': 'receptions',
     'UMLExtensionPoint': 'extensionPoints',
     'UMLSlot': 'slots',
     'UMLTemplateParameter': 'templateParameters',
     'UMLRegion': 'regions',
-    'UMLConstraint': 'constraints',
+    'UMLConstraint': 'ownedElements',
     'UMLInteractionOperand': 'operands',
+    'UMLClass': 'ownedElements',
+    'UMLInterface': 'ownedElements',
+    'UMLEnumeration': 'ownedElements',
+    'UMLDataType': 'ownedElements',
+    'UMLPrimitiveType': 'ownedElements',
+    'UMLSignal': 'ownedElements',
+    'UMLActor': 'ownedElements',
+    'UMLUseCase': 'ownedElements',
+    'UMLComponent': 'ownedElements',
+    'UMLNode': 'ownedElements',
+    'UMLArtifact': 'ownedElements',
+    'UMLCollaboration': 'ownedElements',
+    'UMLPackage': 'ownedElements',
+    'UMLModel': 'ownedElements',
+    'UMLSubsystem': 'ownedElements',
     'SysMLProperty': 'properties',
-    'SysMLOperation': 'operations',
+    'SysMLPort': 'ports',
     'SysMLFlowProperty': 'flowProperties',
     'UMLInputPin': 'inputs',
     'UMLOutputPin': 'outputs',
@@ -310,7 +357,7 @@ const GENERIC_RELATION_CREATE_FIELDS = ['type', 'sourceId', 'targetId', 'name']
 const DIAGRAM_AS_PARENT_TYPES = ['SysMLConstraintParameter']
 // `type` here is the element class to create (e.g. 'UMLParameter'). The type a
 // structural feature *has* is a separate concept and goes in typeId/typeName.
-const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field', 'typeId', 'typeName', 'direction']
+const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field', 'typeId', 'typeName', 'direction', 'specification']
 // Which classes carry a `direction`, and what each one accepts. Both lists come
 // from StarUML's metamodel, and they are NOT the same set: UMLParameter uses
 // UMLDirectionKind ("in", "inout", "out", "return") while SysMLFlowProperty uses
@@ -326,6 +373,15 @@ const DIRECTION_DOMAINS = {
     // SysMLFlowProperty.FD_IN / FD_OUT / FD_INOUT, default 'inout'.
     SysMLFlowProperty: ['in', 'out', 'inout']
 }
+// UMLConstraint and everything the metamodel derives from it. `specification`
+// and `constrainedElements` are declared on UMLConstraint, so the subtypes carry
+// them too.
+const CONSTRAINT_TYPES = ['UMLConstraint', 'UMLIntervalConstraint', 'UMLTimeConstraint', 'UMLDurationConstraint']
+
+function isConstraintType(typeName) {
+    return CONSTRAINT_TYPES.indexOf(typeName) !== -1
+}
+
 // Every value some class accepts. Used only to reject nonsense early, before the
 // element's class is known; checkFeatureFieldsSupported then checks the value
 // against the domain of the class actually being written.
@@ -506,6 +562,20 @@ function serializeElement(elem) {
         } else if (typeof elem.type === 'string') {
             result.typeName = elem.type
         }
+        // `type` is the spelling POST .../attributes takes and PUT
+        // /api/elements/:id now accepts. Emitting it as well means a caller can
+        // read back whichever name it wrote.
+        result.type = result.typeName
+    }
+    // A UMLConstraint's canvas label is its specification, and constrainedElements
+    // is the only machine-readable part of it. Report both so a caller can read
+    // back what it wrote.
+    if (typeof elem.specification === 'string') {
+        result.specification = elem.specification
+    }
+    if (Array.isArray(elem.constrainedElements)) {
+        result.constrainedElementIds = elem.constrainedElements.map(function (c) { return c._id })
+        result.constrainedElementNames = elem.constrainedElements.map(function (c) { return c.name || '' })
     }
     // An operation's return type is a parameter with direction 'return', so the
     // direction has to be visible for the return type to be findable at all.
@@ -908,7 +978,18 @@ const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height', 'alpha', 'distance
 // EdgeParasiticView.EP_HEAD / EP_MIDDLE / EP_TAIL
 const VALID_EDGE_POSITIONS = [0, 1, 2]
 const EDGE_POSITION_LABELS = { 0: 'EP_HEAD', 1: 'EP_MIDDLE', 2: 'EP_TAIL' }
-const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId', 'typeId', 'typeName', 'direction']
+// `type` is accepted here as an alias of `typeName`, because POST
+// .../attributes has always taken `type` and both write the same property. The
+// two endpoints disagreeing on the spelling once produced a verification script
+// that read `type` off an updated attribute, got nothing, and reported 24
+// correct writes as failures.
+//
+// Note the collision this alias does NOT create: on POST /api/elements/:id/children,
+// `type` names the element CLASS to build (UMLParameter), while `typeName` /
+// `typeId` name the type that element HAS (Money). That endpoint keeps both and
+// no alias.
+const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId',
+    'typeId', 'typeName', 'type', 'direction', 'specification', 'constrainedElementIds']
 const EXPORT_ALLOWED_FIELDS = ['path', 'format']
 const VALID_EXPORT_FORMATS = ['png', 'jpeg', 'svg', 'pdf']
 
@@ -2658,6 +2739,32 @@ function serializeMessage(msg) {
     }
     if (msg.signature) {
         result.signature = msg.signature._id
+        result.signatureId = msg.signature._id
+        result.signatureName = msg.signature.name || ''
+        result.signatureType = msg.signature.constructor.name
+        // The operation's owner, so a caller can check the message is pointed at
+        // an operation of the receiving lifeline's classifier without a second
+        // request.
+        if (msg.signature._parent) {
+            result.signatureOwnerId = msg.signature._parent._id
+            result.signatureOwnerName = msg.signature._parent.name || ''
+        }
+        if (Array.isArray(msg.signature.parameters)) {
+            // UML 2.5.1 §17.12.18.7 signature_is_operation_request compares the
+            // argument count with the parameter count. Report the count so the
+            // caller does not have to fetch the operation to check it.
+            result.signatureParameterCount = msg.signature.parameters.filter(function (p) {
+                return p.direction !== 'return'
+            }).length
+        }
+    }
+    MESSAGE_MODEL_FIELDS.forEach(function (f) {
+        if (typeof msg[f] === 'string' && msg[f] !== '') {
+            result[f] = msg[f]
+        }
+    })
+    if (msg.isConcurrentIteration) {
+        result.isConcurrentIteration = true
     }
     if (msg.connector) {
         result.connector = msg.connector._id
@@ -2862,12 +2969,30 @@ const SEQ_DIAGRAM_UPDATE_FIELDS = ['name', 'documentation']
 // role's `type`, which accepts either a Model reference or a plain string.
 const LIFELINE_ALLOWED_FIELDS = ['name', 'stereotype', 'documentation', 'diagramId', 'x', 'y', 'height', 'representTypeId', 'representTypeName']
 const LIFELINE_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'representTypeId', 'representTypeName']
-const MESSAGE_ALLOWED_FIELDS = ['name', 'messageSort', 'source', 'target', 'diagramId', 'y', 'x', 'activationHeight', 'documentation', 'messageType']
+// The model-level fields of a UMLMessage, beyond name/messageSort.
+//
+// `signature` points a message at the UMLOperation (or UMLSignal) it invokes.
+// It is what ties a sequence diagram back to the class diagram: UML 2.5.1
+// §17.12.18.7 signature_refer_to expects the message name to be the operation
+// name, and signature_is_operation_request expects the argument count to match
+// the parameter count. Without it a sequence diagram and a class diagram are
+// two unconnected pictures.
+//
+// serializeMessage has always reported `signature` as an id, so the write takes
+// the same spelling. `signatureId` is accepted as an alias.
+//
+// Note for code generation: StarUML's Java and C# generators read UMLOperation
+// and UMLParameter, not Message.signature. Setting signature does not change
+// what they emit — it restores traceability, not codegen.
+const MESSAGE_MODEL_FIELDS = ['arguments', 'guard', 'sequenceNumber', 'iteration', 'assignmentTarget']
+const MESSAGE_ALLOWED_FIELDS = ['name', 'messageSort', 'source', 'target', 'diagramId', 'y', 'x', 'activationHeight', 'documentation', 'messageType',
+    'signature', 'signatureId', 'isConcurrentIteration'].concat(MESSAGE_MODEL_FIELDS)
 const VALID_MESSAGE_TYPES = ['UMLMessage', 'UMLFoundMessage', 'UMLLostMessage']
 // y/x/activationHeight live on the message's view, not the model. y is the
 // message's vertical position; x only takes effect on a found/lost message's
 // free endpoint (updateMessage reports it as ignored otherwise).
-const MESSAGE_UPDATE_FIELDS = ['name', 'messageSort', 'documentation', 'y', 'x', 'activationHeight']
+const MESSAGE_UPDATE_FIELDS = ['name', 'messageSort', 'documentation', 'y', 'x', 'activationHeight',
+    'signature', 'signatureId', 'isConcurrentIteration'].concat(MESSAGE_MODEL_FIELDS)
 const COMBINED_FRAGMENT_ALLOWED_FIELDS = ['name', 'interactionOperator', 'diagramId', 'x', 'y', 'width', 'height', 'documentation']
 const COMBINED_FRAGMENT_UPDATE_FIELDS = ['name', 'interactionOperator', 'documentation']
 const OPERAND_ALLOWED_FIELDS = ['name', 'guard', 'documentation']
@@ -3465,6 +3590,76 @@ function getMessages(interactionId, reqInfo) {
     }
 }
 
+/**
+ * Resolve the operation or signal a message invokes.
+ *
+ * UML 2.5.1 constrains Message::signature to an Operation or a Signal, which is
+ * tighter than StarUML's metamodel (a bare UMLModelElement ref). Enforce the
+ * spec: a message pointed at a class or a package satisfies no UML rule and
+ * would only look like traceability.
+ *
+ * Returns { skip }, { error } or { value, field }. `value` is null when the
+ * caller asked to clear the signature.
+ */
+function resolveMessageSignature(body) {
+    const spellings = ['signature', 'signatureId']
+    const given = spellings.filter(function (s) { return body[s] !== undefined })
+    if (given.length === 0) {
+        return { skip: true }
+    }
+    if (given.length > 1) {
+        return { error: 'Fields "signature" and "signatureId" are two names for the same property. Provide one of them.' }
+    }
+    const field = given[0]
+    const value = body[field]
+    if (value === null) {
+        return { value: null, field: field }
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+        return { error: 'Field "' + field + '" must be an element id, or null to clear it' }
+    }
+    const target = findById(value)
+    if (!target) {
+        return { error: field + ' not found: ' + value }
+    }
+    const isOperation = !!(type.UMLOperation && target instanceof type.UMLOperation)
+    const isSignal = !!(type.UMLSignal && target instanceof type.UMLSignal)
+    if (!isOperation && !isSignal) {
+        return { error: field + ' must refer to a UMLOperation or a UMLSignal (UML 2.5.1 Message::signature). Got ' +
+            target.constructor.name + ' (' + value + ')' }
+    }
+    return { value: target, field: field }
+}
+
+/**
+ * Write the UMLMessage model fields shared by create and update.
+ */
+function applyMessageModelFields(report, msg, body, signature) {
+    if (signature && !signature.skip) {
+        applyProperty(report, msg, 'signature', signature.value, signature.field)
+    }
+    MESSAGE_MODEL_FIELDS.forEach(function (f) {
+        if (body[f] !== undefined) {
+            applyProperty(report, msg, f, body[f])
+        }
+    })
+    if (body.isConcurrentIteration !== undefined) {
+        applyProperty(report, msg, 'isConcurrentIteration', body.isConcurrentIteration)
+    }
+    return report
+}
+
+/**
+ * Type checks for the message model fields, shared by create and update.
+ */
+function messageModelFieldChecks(body) {
+    const checks = [checkFieldType(body, 'isConcurrentIteration', 'boolean')]
+    MESSAGE_MODEL_FIELDS.forEach(function (f) {
+        checks.push(checkFieldType(body, f, 'string'))
+    })
+    return checks
+}
+
 function createMessage(interactionId, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, MESSAGE_ALLOWED_FIELDS),
@@ -3478,9 +3673,14 @@ function createMessage(interactionId, body, reqInfo) {
         checkFieldType(body, 'x', 'number'),
         checkFieldType(body, 'activationHeight', 'number'),
         checkFieldType(body, 'documentation', 'string')
-    ])
+    ].concat(messageModelFieldChecks(body)))
     if (err) {
         return validationError(err, reqInfo, body)
+    }
+
+    const signature = resolveMessageSignature(body)
+    if (signature.error) {
+        return validationError(signature.error, reqInfo, body)
     }
 
     const msgType = body.messageType || 'UMLMessage'
@@ -3609,8 +3809,10 @@ function createMessage(interactionId, body, reqInfo) {
     }
     const msg = view.model
 
-    // Resize activation bar if activationHeight is specified
     const report = createWriteReport()
+    applyMessageModelFields(report, msg, body, signature)
+
+    // Resize activation bar if activationHeight is specified
     if (body.activationHeight !== undefined) {
         if (view.activation) {
             applyProperty(report, view.activation, 'height', body.activationHeight, 'activationHeight')
@@ -3622,6 +3824,10 @@ function createMessage(interactionId, body, reqInfo) {
 
     autoExpandFrame(diagram)
 
+    // Draw once so StarUML puts the new message at the list position its y
+    // implies, rather than at the end of interaction.messages.
+    arrangeDiagram(diagram)
+
     // Read the y back only after the frame settles, so the report describes
     // where the message actually is rather than where it was asked to go.
     if (body.y !== undefined) {
@@ -3630,6 +3836,10 @@ function createMessage(interactionId, body, reqInfo) {
 
     const data = serializeMessage(msg)
     data.view = serializeMessageView(view)
+    if (msg._parent && Array.isArray(msg._parent.messages)) {
+        data.messageIndex = msg._parent.messages.indexOf(msg)
+        data.messageCount = msg._parent.messages.length
+    }
     return attachWriteReport({
         success: true,
         message: appendWriteWarnings('Created ' + msgType + ' "' + (msg.name || msg._id) + '" with view on diagram "' + diagram.name + '"', report),
@@ -3814,7 +4024,7 @@ function updateMessage(id, body, reqInfo) {
         checkFieldType(body, 'y', 'number'),
         checkFieldType(body, 'x', 'number'),
         checkFieldType(body, 'activationHeight', 'number')
-    ])
+    ].concat(messageModelFieldChecks(body)))
     if (err) {
         return validationError(err, reqInfo, body)
     }
@@ -3825,6 +4035,11 @@ function updateMessage(id, body, reqInfo) {
 
     if (body.messageSort !== undefined && VALID_MESSAGE_SORTS.indexOf(body.messageSort) === -1) {
         return validationError('Invalid messageSort "' + body.messageSort + '". Allowed values: ' + VALID_MESSAGE_SORTS.join(', '), reqInfo, body)
+    }
+
+    const signature = resolveMessageSignature(body)
+    if (signature.error) {
+        return validationError(signature.error, reqInfo, body)
     }
 
     const msg = findById(id)
@@ -3848,6 +4063,7 @@ function updateMessage(id, body, reqInfo) {
     if (body.documentation !== undefined) {
         applyProperty(report, msg, 'documentation', body.documentation)
     }
+    applyMessageModelFields(report, msg, body, signature)
 
     if (body.y !== undefined) {
         const actualY = setMessageViewY(view, body.y)
@@ -3881,10 +4097,26 @@ function updateMessage(id, body, reqInfo) {
         }
     }
 
+    // Moving a message changes where it belongs in interaction.messages, and
+    // that list is what a reader of the .mdj sees as the message order.
+    // UMLSequenceDiagram.drawDiagram() is what re-sorts it — nothing else does —
+    // so draw the diagram before answering. Without this the API reported a
+    // successful move while the saved order stayed as it was, and the caller had
+    // to walk the list one PUT /api/elements/:id/reorder at a time.
+    if (body.y !== undefined) {
+        arrangeDiagram(diagramOfView(view))
+    }
+
     const data = serializeMessage(msg)
     const msgView = view || findMessageView(msg)
     if (msgView) {
         data.view = serializeMessageView(msgView)
+    }
+    // Where the message now sits in its interaction's list, so a caller can
+    // check the order without a second request.
+    if (msg._parent && Array.isArray(msg._parent.messages)) {
+        data.messageIndex = msg._parent.messages.indexOf(msg)
+        data.messageCount = msg._parent.messages.length
     }
 
     return attachWriteReport({
@@ -5421,6 +5653,175 @@ function isEdgeParasiticView(view) {
     return isParasiticView(view) && view.edgePosition !== undefined
 }
 
+// ============================================================
+// Parasitic View Geometry
+// ============================================================
+
+// A parasitic view stores no position of its own. StarUML recomputes left/top
+// on every arrange pass, from `alpha` (angle) and `distance` (offset) measured
+// against an anchor on the host. Writing left/top therefore looked accepted and
+// was overwritten by the next repaint.
+//
+// The two functions below are ports of StarUML's own geometry, so the values
+// this API writes are the values a mouse drag would write:
+//
+//   forward   EdgeParasiticView.arrangeObject / NodeParasiticView.arrange
+//             left = Coord.getPointAwayLine(p1, p2, alpha, distance).x + p1.x - floor(width/2)
+//   inverse   ParasiticManipulator.endManipulate
+//             Coord.getPolar(Rect(p1, p2), centreOfTheDroppedLabel)
+//
+// Both live in StarUML's core; an extension cannot require them, so they are
+// reimplemented here. Keep them identical to the originals — a divergence
+// shows up as a label that jumps on the next repaint.
+
+/**
+ * The anchor point p1 and the direction point p2 a parasitic view measures
+ * from. Returns null when the host is missing or has no usable geometry.
+ */
+function parasiticAnchor(view) {
+    if (typeof type !== 'undefined' && type.NodeParasiticView && view instanceof type.NodeParasiticView) {
+        const node = view.hostNode || view._parent
+        if (!node || node.left === undefined) {
+            return null
+        }
+        const right = typeof node.getRight === 'function' ? node.getRight() : node.left + (node.width || 0)
+        const bottom = typeof node.getBottom === 'function' ? node.getBottom() : node.top + (node.height || 0)
+        const p = { x: (node.left + right) / 2, y: (node.top + bottom) / 2 }
+        // NodeParasiticView passes the same point twice, which makes the
+        // reference angle zero.
+        return { p1: p, p2: p }
+    }
+
+    const edge = view.hostEdge || view._parent
+    if (!edge || !edge.points || typeof edge.points.count !== 'function' || edge.points.count() < 2) {
+        return null
+    }
+    const pts = edge.points
+    const count = pts.count()
+    let p1
+    let p2
+    switch (view.edgePosition) {
+        case 0: // EP_HEAD
+            p1 = pts.getPoint(count - 1)
+            p2 = pts.getPoint(count - 2)
+            break
+        case 2: // EP_TAIL
+            p1 = pts.getPoint(0)
+            p2 = pts.getPoint(1)
+            break
+        case 1: { // EP_MIDDLE
+            let mid = Math.floor(count / 2)
+            if (count % 2 === 0) {
+                mid -= 1
+            }
+            const a = pts.getPoint(mid)
+            const b = pts.getPoint(mid + 1)
+            p2 = { x: b.x, y: b.y }
+            p1 = count % 2 === 0
+                ? { x: Math.floor((a.x + b.x) / 2), y: Math.floor((a.y + b.y) / 2) }
+                : { x: a.x, y: a.y }
+            break
+        }
+        default:
+            return null
+    }
+    return { p1: { x: p1.x, y: p1.y }, p2: { x: p2.x, y: p2.y } }
+}
+
+/**
+ * Port of Coord.getPolar: the alpha/distance that put a label's centre at `p`.
+ */
+function polarFromAnchor(p1, p2, p) {
+    function angle(dy, dx) {
+        const b = dx + 0.00001
+        let th = Math.atan(dy / b)
+        if (b < 0) {
+            th += Math.PI
+        }
+        return th
+    }
+    const th1 = angle(p2.y - p1.y, p2.x - p1.x)
+    const th2 = angle(p.y - p1.y, p.x - p1.x)
+    return {
+        alpha: th1 - th2,
+        distance: Math.sqrt((p1.x - p.x) * (p1.x - p.x) + (p1.y - p.y) * (p1.y - p.y))
+    }
+}
+
+/**
+ * Move a parasitic view, taking either polar (alpha/distance) or cartesian
+ * (left/top) coordinates.
+ *
+ * Goes through app.engine.moveParasiticView, which is what a mouse drag uses:
+ * it sets alpha/distance, repaints so arrange recomputes left/top, then records
+ * every changed field — left and top included — as one undoable operation. The
+ * recomputed left/top are therefore in the repository, and in the .mdj after a
+ * save, without exporting an image to force a redraw.
+ *
+ * Returns an error string, or null on success. The write report says what the
+ * geometry actually became.
+ */
+function moveParasiticGeometry(view, body, report) {
+    const anchor = parasiticAnchor(view)
+    if (!anchor) {
+        return 'This ' + view.constructor.name + ' has no host geometry to measure against, so its position cannot be set. ' +
+            'An edge label needs its host edge to have at least two points.'
+    }
+
+    let alpha
+    let distance
+    if (body.left !== undefined || body.top !== undefined) {
+        // arrangeObject derives left/top from the label's centre, so convert.
+        const left = body.left !== undefined ? body.left : view.left
+        const top = body.top !== undefined ? body.top : view.top
+        const centre = {
+            x: left + Math.floor((view.width || 0) / 2),
+            y: top + Math.floor((view.height || 0) / 2)
+        }
+        const polar = polarFromAnchor(anchor.p1, anchor.p2, centre)
+        alpha = body.alpha !== undefined ? body.alpha : polar.alpha
+        distance = body.distance !== undefined ? body.distance : polar.distance
+    } else {
+        alpha = body.alpha !== undefined ? body.alpha : view.alpha
+        distance = body.distance !== undefined ? body.distance : view.distance
+    }
+
+    if (!isFinite(alpha) || !isFinite(distance)) {
+        return 'Could not work out an angle and offset for that position (the requested point coincides with the anchor).'
+    }
+
+    const diagram = diagramOfView(view)
+    const editor = diagram ? editorForDiagram(diagram) : null
+    if (!editor) {
+        return 'No diagram editor is available, so the view cannot be re-arranged.'
+    }
+
+    const before = { left: view.left, top: view.top, alpha: view.alpha, distance: view.distance }
+    app.engine.moveParasiticView(editor, view, alpha, distance)
+
+    // Report against what the caller asked for, not against what we computed:
+    // arrange rounds with Math.floor, so a requested left of 900 can settle at
+    // 899. The caller must be told which.
+    const requested = {}
+    if (body.left !== undefined) requested.left = body.left
+    if (body.top !== undefined) requested.top = body.top
+    if (body.alpha !== undefined) requested.alpha = body.alpha
+    if (body.distance !== undefined) requested.distance = body.distance
+
+    Object.keys(requested).forEach(function (f) {
+        const actual = view[f]
+        if (writeValuesEqual(actual, requested[f])) {
+            report.updated.push(f)
+        } else if (writeValuesEqual(actual, before[f])) {
+            reportIgnoredWrite(report, f, requested[f], actual,
+                'the arrange pass kept the previous value')
+        } else {
+            report.clamped.push({ field: f, requested: requested[f], actual: actual })
+        }
+    })
+    return null
+}
+
 function updateView(id, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, VIEW_UPDATE_FIELDS),
@@ -5460,6 +5861,44 @@ function updateView(id, body, reqInfo) {
     }
 
     const report = createWriteReport()
+
+    // A parasitic view's left/top are derived, not stored: every arrange pass
+    // recomputes them from alpha/distance. Assigning them directly is what used
+    // to report a successful write that the next repaint discarded. Convert the
+    // requested position into the polar pair the engine actually keeps, then let
+    // the engine arrange and record the resulting left/top itself.
+    if (isParasiticView(view)) {
+        if (body.edgePosition !== undefined) {
+            // edgePosition changes which end of the edge the label measures
+            // from, so it has to be set before the position is computed.
+            applyProperty(report, view, 'edgePosition', body.edgePosition)
+        }
+        if (body.width !== undefined) {
+            applyProperty(report, view, 'width', body.width)
+        }
+        if (body.height !== undefined) {
+            applyProperty(report, view, 'height', body.height)
+        }
+        if (body.left !== undefined || body.top !== undefined ||
+            body.alpha !== undefined || body.distance !== undefined) {
+            const moveErr = moveParasiticGeometry(view, body, report)
+            if (moveErr) {
+                return validationError(moveErr, reqInfo, body)
+            }
+        } else if (body.width !== undefined || body.height !== undefined || body.edgePosition !== undefined) {
+            // arrange derives left/top from the label's size and its position on
+            // the edge, so those writes move it too. Draw once, or the geometry
+            // this response reports is the geometry from before the write.
+            arrangeDiagram(diagramOfView(view))
+        }
+        return attachWriteReport({
+            success: true,
+            message: writeReportMessage('Updated view', report),
+            request: Object.assign({}, reqInfo, { body: body }),
+            data: serializeViewInfo(view)
+        }, report)
+    }
+
     if (body.left !== undefined) {
         applyProperty(report, view, 'left', body.left)
     }
@@ -5471,15 +5910,6 @@ function updateView(id, body, reqInfo) {
     }
     if (body.height !== undefined) {
         applyProperty(report, view, 'height', body.height)
-    }
-    if (body.alpha !== undefined) {
-        applyProperty(report, view, 'alpha', body.alpha)
-    }
-    if (body.distance !== undefined) {
-        applyProperty(report, view, 'distance', body.distance)
-    }
-    if (body.edgePosition !== undefined) {
-        applyProperty(report, view, 'edgePosition', body.edgePosition)
     }
 
     // Re-route connected edges when node position or size changes.
@@ -5517,13 +5947,26 @@ function updateView(id, body, reqInfo) {
  * or a plain string, so typeId and typeName write to the same place. Resolving
  * up front lets createChildElement reject a bad id before it creates anything.
  * Returns { skip }, { error } or { value, field }.
+ *
+ * `allowTypeAlias` accepts `type` as a third spelling of `typeName`. Only
+ * PUT /api/elements/:id passes it: on POST .../children, `type` names the
+ * element class to create, which is a different thing entirely.
  */
-function resolveFeatureType(body) {
-    if (body.typeId === undefined && body.typeName === undefined) {
+function resolveFeatureType(body, allowTypeAlias) {
+    const spellings = ['typeId', 'typeName']
+    if (allowTypeAlias) {
+        spellings.push('type')
+    }
+    const given = spellings.filter(function (s) { return body[s] !== undefined })
+    if (given.length === 0) {
         return { skip: true }
     }
-    if (body.typeId !== undefined && body.typeName !== undefined) {
-        return { error: 'Fields "typeId" and "typeName" are mutually exclusive. Provide one of them.' }
+    if (given.length > 1) {
+        return { error: 'Fields ' + given.map(function (s) { return '"' + s + '"' }).join(' and ') +
+            ' are mutually exclusive — they all write the same property. Provide one of them.' }
+    }
+    if (allowTypeAlias && body.type !== undefined) {
+        return { value: body.type, field: 'type' }
     }
     if (body.typeName !== undefined) {
         return { value: body.typeName, field: 'typeName' }
@@ -5549,7 +5992,7 @@ function resolveFeatureType(body) {
  */
 function checkFeatureFieldsSupported(typeName, isStructuralFeature, body, featureType) {
     if (!featureType.skip && !isStructuralFeature) {
-        return 'Fields "typeId" and "typeName" are only supported for structural features (UMLAttribute, UMLParameter, UMLPort, ...). Got ' + typeName
+        return 'Fields "typeId", "typeName" and "type" are only supported for structural features (UMLAttribute, UMLParameter, UMLPort, ...). Got ' + typeName
     }
     if (body.direction !== undefined) {
         const domain = DIRECTION_DOMAINS[typeName]
@@ -5585,17 +6028,23 @@ function updateGenericElement(id, body, reqInfo) {
         checkFieldType(body, 'referenceId', 'string|null'),
         checkFieldType(body, 'typeId', 'string|null'),
         checkFieldType(body, 'typeName', 'string'),
-        checkFieldType(body, 'direction', 'string')
+        checkFieldType(body, 'type', 'string'),
+        checkFieldType(body, 'direction', 'string'),
+        checkFieldType(body, 'specification', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
+    }
+
+    if (body.constrainedElementIds !== undefined && !Array.isArray(body.constrainedElementIds)) {
+        return validationError('Field "constrainedElementIds" must be an array of element ids', reqInfo, body)
     }
 
     if (body.direction !== undefined && ALL_DIRECTION_VALUES.indexOf(body.direction) === -1) {
         return validationError('Invalid direction "' + body.direction + '". Allowed: ' + ALL_DIRECTION_VALUES.join(', '), reqInfo, body)
     }
 
-    const featureType = resolveFeatureType(body)
+    const featureType = resolveFeatureType(body, true)
     if (featureType.error) {
         return validationError(featureType.error, reqInfo, body)
     }
@@ -5604,11 +6053,11 @@ function updateGenericElement(id, body, reqInfo) {
         return validationError('At least one field must be provided. Allowed fields: ' + GENERIC_ELEMENT_UPDATE_FIELDS.join(', '), reqInfo, body)
     }
 
-    if (body.name !== undefined) {
-        const nameErr = checkNonEmptyString(body, 'name')
-        if (nameErr) {
-            return validationError(nameErr, reqInfo, body)
-        }
+    // An empty name is a legal value here, unlike on create. An association gets
+    // a generated name it may not want, and before this the only way to shrink
+    // that label was to rename it to something shorter.
+    if (body.name !== undefined && typeof body.name !== 'string') {
+        return validationError('Field "name" must be a string', reqInfo, body)
     }
 
     const elem = findById(id)
@@ -5618,6 +6067,42 @@ function updateGenericElement(id, body, reqInfo) {
 
     if (body.referenceId !== undefined && !(elem instanceof type.Hyperlink)) {
         return validationError('Field "referenceId" is only supported for Hyperlink elements', reqInfo, body)
+    }
+
+    // UMLConstraintView draws `specification`, not `name`, so a constraint
+    // without one is an empty {} on the canvas. `constrainedElements` is what
+    // makes a constraint machine-readable: it names the elements the constraint
+    // is about, instead of leaving that to whoever reads the label.
+    const isConstraint = !!(type.UMLConstraint && elem instanceof type.UMLConstraint)
+    if (body.specification !== undefined && !isConstraint) {
+        return validationError('Field "specification" is only supported for UMLConstraint elements. Got ' + elem.constructor.name, reqInfo, body)
+    }
+    if (body.constrainedElementIds !== undefined && !isConstraint) {
+        return validationError('Field "constrainedElementIds" is only supported for UMLConstraint elements. Got ' + elem.constructor.name, reqInfo, body)
+    }
+
+    // Resolve every id before writing any of them, so a typo in the middle of
+    // the list cannot leave a half-rewritten constraint behind.
+    let constrainedTargets = null
+    if (body.constrainedElementIds !== undefined) {
+        constrainedTargets = []
+        for (let ci = 0; ci < body.constrainedElementIds.length; ci++) {
+            const cid = body.constrainedElementIds[ci]
+            if (typeof cid !== 'string') {
+                return validationError('constrainedElementIds[' + ci + '] must be a string element id', reqInfo, body)
+            }
+            const target = findById(cid)
+            if (!target) {
+                return { success: false, error: 'constrainedElementIds[' + ci + '] not found: ' + cid, request: Object.assign({}, reqInfo, { body: body }) }
+            }
+            if (!(target instanceof type.UMLModelElement)) {
+                return validationError('constrainedElementIds[' + ci + '] must refer to a UMLModelElement. Got ' +
+                    target.constructor.name + ' (' + cid + ')', reqInfo, body)
+            }
+            if (constrainedTargets.indexOf(target) === -1) {
+                constrainedTargets.push(target)
+            }
+        }
     }
 
     const featureErr = checkFeatureFieldsSupported(
@@ -5657,6 +6142,12 @@ function updateGenericElement(id, body, reqInfo) {
     if (body.direction !== undefined) {
         applyProperty(report, elem, 'direction', body.direction)
     }
+    if (body.specification !== undefined) {
+        applyProperty(report, elem, 'specification', body.specification)
+    }
+    if (constrainedTargets) {
+        setRefsCollection(report, elem, 'constrainedElements', constrainedTargets, 'constrainedElementIds')
+    }
 
     return attachWriteReport({
         success: true,
@@ -5664,6 +6155,60 @@ function updateGenericElement(id, body, reqInfo) {
         request: Object.assign({}, reqInfo, { body: body }),
         data: serializeElement(elem)
     }, report)
+}
+
+/**
+ * Replace the contents of a `refs` collection with `wanted`, and report the
+ * result the way applyProperty does.
+ *
+ * Not app.engine.setProperty: that builds a FIELD_ASSIGN operation, and
+ * Repository._applyOperation only updates the reverse-reference index when the
+ * assigned value is a single element with an `_id`. Handing it an array assigns
+ * the array and leaves the index stale, so app.repository.getRefsTo() — which
+ * delete uses to find what points at an element — would not see the new
+ * members. engine.addItem/removeItem go through FIELD_INSERT / FIELD_REMOVE,
+ * which do maintain the index.
+ */
+function setRefsCollection(report, elem, prop, wanted, fieldName) {
+    const name = fieldName || prop
+    const before = Array.isArray(elem[prop]) ? elem[prop].slice() : null
+    if (before === null) {
+        reportIgnoredWrite(report, name, wanted.length + ' element(s)', undefined,
+            prop + ' is not a collection on ' + elem.constructor.name)
+        return report
+    }
+
+    // Clear and rebuild rather than diffing. A minimal diff appends the missing
+    // members to the end, so asking for [B, A] when [A] is there yields [A, B] —
+    // the right set in the wrong order, which the check below would then report
+    // as a clamp on a write that was in fact honoured. The order is part of what
+    // the caller asked for; rebuilding is the only way to guarantee it.
+    const alreadyRight = before.length === wanted.length && wanted.every(function (target, i) {
+        return before[i] === target
+    })
+    if (!alreadyRight) {
+        before.forEach(function (existing) {
+            app.engine.removeItem(elem, prop, existing)
+        })
+        wanted.forEach(function (target) {
+            app.engine.addItem(elem, prop, target)
+        })
+    }
+
+    const after = elem[prop] || []
+    const matches = after.length === wanted.length && wanted.every(function (target, i) {
+        return after[i] === target
+    })
+    if (matches) {
+        report.updated.push(name)
+    } else {
+        report.clamped.push({
+            field: name,
+            requested: wanted.map(function (t) { return t._id }).join(', ') || '(empty)',
+            actual: after.map(function (t) { return t._id }).join(', ') || '(empty)'
+        })
+    }
+    return report
 }
 
 function deleteGenericElement(id, reqInfo) {
@@ -6435,7 +6980,8 @@ function createChildElement(parentId, body, reqInfo) {
         checkFieldType(body, 'field', 'string'),
         checkFieldType(body, 'typeId', 'string|null'),
         checkFieldType(body, 'typeName', 'string'),
-        checkFieldType(body, 'direction', 'string')
+        checkFieldType(body, 'direction', 'string'),
+        checkFieldType(body, 'specification', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -6443,6 +6989,13 @@ function createChildElement(parentId, body, reqInfo) {
 
     if (!body.type) {
         return validationError('Field "type" is required', reqInfo, body)
+    }
+
+    // UMLConstraint draws its `specification`, not its name, so a constraint
+    // created without one shows as an empty {} on the canvas.
+    if (body.specification !== undefined && !isConstraintType(body.type)) {
+        return validationError('Field "specification" is only supported for UMLConstraint and its subtypes (' +
+            CONSTRAINT_TYPES.join(', ') + '). Got ' + body.type, reqInfo, body)
     }
 
     if (ALLOWED_CHILD_TYPES.indexOf(body.type) === -1) {
@@ -6468,37 +7021,74 @@ function createChildElement(parentId, body, reqInfo) {
         return { success: false, error: 'Parent element not found: ' + parentId, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
-    const field = body.field || CHILD_TYPE_DEFAULT_FIELDS[body.type] || null
+    // Factory.createModel defaults an absent field to 'ownedElements', so a type
+    // with no table entry still lands somewhere real.
+    const field = body.field || CHILD_TYPE_DEFAULT_FIELDS[body.type] || 'ownedElements'
+
+    // The parent must actually carry this collection. StarUML's factory writes
+    // through engine.addModel, which is a no-op when parent[field] is not an
+    // array — it then reports success and hands back an element the repository
+    // never registered. Refuse before anything is built, and name the fields
+    // that would have worked.
+    if (!Array.isArray(parent[field])) {
+        const usable = CHILD_CONTAINER_FIELDS.filter(function (f) {
+            return Array.isArray(parent[f])
+        })
+        return validationError('Field "' + field + '" is not a collection on ' +
+            parent.constructor.name + ' "' + (parent.name || parentId) + '", so nothing could be created there. ' +
+            'Collections this parent has: ' + (usable.length > 0 ? usable.join(', ') : '(none)'), reqInfo, body)
+    }
 
     const options = {
         id: body.type,
-        parent: parent
-    }
-    if (field) {
-        options.field = field
+        parent: parent,
+        field: field
     }
 
     try {
         const model = app.factory.createModel(options)
 
-        const report = createWriteReport()
-        if (body.name && model) {
-            applyProperty(report, model, 'name', body.name)
-        }
-        if (model) {
-            if (!featureType.skip) {
-                applyProperty(report, model, 'type', featureType.value, featureType.field)
+        // A null model means the factory discarded the write. Reporting success
+        // here is what let a caller record a constraint that does not exist.
+        if (!model || typeof model._id !== 'string') {
+            return {
+                success: false,
+                error: 'StarUML created no element for type "' + body.type + '" in field "' + field +
+                    '" of ' + parent.constructor.name + '. The type may not be registered with the model factory.',
+                request: Object.assign({}, reqInfo, { body: body })
             }
-            if (body.direction !== undefined) {
-                applyProperty(report, model, 'direction', body.direction)
+        }
+        // ...and a model that exists but is not in the collection is the same
+        // failure one step later.
+        if (parent[field].indexOf(model) === -1) {
+            return {
+                success: false,
+                error: 'Created "' + body.type + '" did not land in ' + parent.constructor.name + '.' + field + '.',
+                request: Object.assign({}, reqInfo, { body: body })
             }
         }
 
+        const report = createWriteReport()
+        if (body.name) {
+            applyProperty(report, model, 'name', body.name)
+        }
+        if (!featureType.skip) {
+            applyProperty(report, model, 'type', featureType.value, featureType.field)
+        }
+        if (body.direction !== undefined) {
+            applyProperty(report, model, 'direction', body.direction)
+        }
+        if (body.specification !== undefined) {
+            applyProperty(report, model, 'specification', body.specification)
+        }
+
+        const data = serializeElement(model)
+        data.field = field
         return attachWriteReport({
             success: true,
-            message: appendWriteWarnings('Created child "' + (model ? model.name || body.type : body.type) + '" under "' + (parent.name || parentId) + '"', report),
+            message: appendWriteWarnings('Created child "' + (model.name || body.type) + '" under "' + (parent.name || parentId) + '" in field "' + field + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
-            data: serializeElement(model)
+            data: data
         }, report)
     } catch (e) {
         return {
@@ -6590,38 +7180,78 @@ function updateViewStyle(id, body, reqInfo) {
     }, report)
 }
 
-function undoAction(reqInfo) {
+/**
+ * How many operations are on one of StarUML's history stacks, or null when the
+ * stack cannot be read.
+ *
+ * Repository exposes no canUndo(); Repository.undo() checks
+ * `this._undoStack.size() > 0` itself and returns silently when the stack is
+ * empty. Without this count the API answered "Undo executed" to a request that
+ * did nothing, which reads as "your change was reverted" when nothing was.
+ */
+function historyStackSize(name) {
     try {
-        app.repository.undo()
-        return {
-            success: true,
-            message: 'Undo executed',
-            request: reqInfo
+        const stack = app.repository[name]
+        if (stack && typeof stack.size === 'function') {
+            return stack.size()
         }
+    } catch (e) {
+        // A future StarUML may rename the private stacks. Fall back to reporting
+        // nothing rather than failing the request.
+    }
+    return null
+}
+
+function historyAction(reqInfo, verb, stackName, run) {
+    const before = historyStackSize(stackName)
+    if (before === 0) {
+        return {
+            success: false,
+            error: 'Nothing to ' + verb + ': the ' + verb + ' stack is empty.',
+            request: reqInfo,
+            data: { stackSizeBefore: 0, stackSizeAfter: 0 }
+        }
+    }
+    try {
+        run()
     } catch (e) {
         return {
             success: false,
-            error: 'Failed to undo: ' + (e.message || String(e)),
+            error: 'Failed to ' + verb + ': ' + (e.message || String(e)),
             request: reqInfo
         }
+    }
+    const after = historyStackSize(stackName)
+    // Repository.undo() swallows its own exceptions (it logs and returns), so a
+    // stack that did not shrink is the only sign the operation did not run.
+    if (before !== null && after !== null && after >= before) {
+        return {
+            success: false,
+            error: verb.charAt(0).toUpperCase() + verb.slice(1) + ' did not run: the ' + verb +
+                ' stack still holds ' + after + ' operation(s). StarUML logs the reason to its console.',
+            request: reqInfo,
+            data: { stackSizeBefore: before, stackSizeAfter: after }
+        }
+    }
+    return {
+        success: true,
+        message: verb.charAt(0).toUpperCase() + verb.slice(1) + ' executed' +
+            (after === null ? '' : ' (' + after + ' operation(s) left to ' + verb + ')'),
+        request: reqInfo,
+        data: { stackSizeBefore: before, stackSizeAfter: after }
     }
 }
 
+function undoAction(reqInfo) {
+    return historyAction(reqInfo, 'undo', '_undoStack', function () {
+        app.repository.undo()
+    })
+}
+
 function redoAction(reqInfo) {
-    try {
+    return historyAction(reqInfo, 'redo', '_redoStack', function () {
         app.repository.redo()
-        return {
-            success: true,
-            message: 'Redo executed',
-            request: reqInfo
-        }
-    } catch (e) {
-        return {
-            success: false,
-            error: 'Failed to redo: ' + (e.message || String(e)),
-            request: reqInfo
-        }
-    }
+    })
 }
 
 function searchElements(query, reqInfo) {
@@ -6681,6 +7311,30 @@ function layoutDiagram(diagramId, body, reqInfo) {
     const diagram = findById(diagramId)
     if (!diagram || !diagram.ownedViews) {
         return { success: false, error: 'Diagram not found: ' + diagramId, request: Object.assign({}, reqInfo, { body: body }) }
+    }
+
+    // Laying out a sequence diagram corrupts it, and not because the layout
+    // algorithm is a poor fit — UMLSequenceDiagram.layout() is an empty stub, so
+    // no layout is even attempted. The damage comes from Engine.layoutDiagram's
+    // own bookkeeping:
+    //
+    //   1. it snapshots diagram.ownedViews[i] into mementoArray[i]
+    //   2. it calls editor.repaint(), and UMLSequenceDiagram.drawDiagram() runs
+    //      regulateSequenceNumber(), which splices ownedViews into message order
+    //   3. it then diffs diagram.ownedViews[i] against mementoArray[i]
+    //
+    // After the splice, index i is a different view than it was in step 1, so
+    // every view is diffed against another view's snapshot and assigned that
+    // view's geometry. There is no direction or separation that avoids this.
+    //
+    // To move a message, write its y: PUT /api/seq/messages/:id { "y": ... }.
+    // That reorders the interaction's message list through StarUML's own
+    // regulateSequenceNumber, which is the supported path.
+    if (diagram instanceof type.UMLSequenceDiagram) {
+        return validationError('Layout is not supported for a UMLSequenceDiagram and would destroy its arrangement. ' +
+            'Engine.layoutDiagram diffs views by index across a repaint, and a sequence diagram reorders its own views during that repaint, ' +
+            'so each view is assigned another view\'s geometry. Move messages with PUT /api/seq/messages/:id { "y": ... } instead.',
+            reqInfo, body)
     }
 
     const separations = body.separations || { node: 20, edge: 10, rank: 50 }
@@ -7795,6 +8449,22 @@ function buildCapabilities() {
         allowedMermaidTypes: VALID_MERMAID_TYPES,
         allowedGeneratorTypes: VALID_GENERATOR_TYPES,
         allowedMessageTypes: VALID_MESSAGE_TYPES,
+        allowedChildContainerFields: CHILD_CONTAINER_FIELDS,
+        // Which body fields each general-purpose write accepts. Read from the
+        // same constants the handlers validate against, so a caller can find out
+        // what this build takes instead of discovering it from a rejection —
+        // and so this listing cannot drift away from the code.
+        writableFields: {
+            'PUT /api/elements/:id': GENERIC_ELEMENT_UPDATE_FIELDS,
+            'POST /api/elements/:id/children': GENERIC_CHILD_CREATE_FIELDS,
+            'PUT /api/views/:id': VIEW_UPDATE_FIELDS,
+            'POST /api/seq/interactions/:id/messages': MESSAGE_ALLOWED_FIELDS,
+            'PUT /api/seq/messages/:id': MESSAGE_UPDATE_FIELDS,
+            // Relation ends take these inside end1/end2. `reference` moves the
+            // end to a different element and re-points every view of the
+            // relation; `referenceId` is the same field under the other name.
+            'relation end (end1/end2)': ['name', 'navigable', 'aggregation', 'multiplicity', 'reference', 'referenceId']
+        },
         endpoints: [
             'GET  /api/status',
             'GET  /api/status/capabilities',
