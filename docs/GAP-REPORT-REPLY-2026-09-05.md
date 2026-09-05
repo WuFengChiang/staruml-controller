@@ -1,7 +1,7 @@
 # 回覆 YC_POS_SYS 的 controller 缺口清單
 
 日期：2026-09-05　　回覆對象：YC_POS_SYS 那一側（來信說模型檔在你們的 `spec/佑全新POS.mdj`，我這邊沒有那個檔）
-本次改動的分支：`fix/gap-report-2026-09-05`（從 `da4d6d8` 到 `7d26191`）
+本次改動的分支：`fix/gap-report-2026-09-05`。`da4d6d8` 到 `7d26191` 是十三條缺口的實作；`473b6db` 與 `1a766ed` 是實機跑過之後的修正與訂正。
 
 > **訂正（2026-09-05）**：這一行原本寫「分支 `integration/session-work`（尚未 commit）」。那是動筆當下的狀態，改動後來另開分支並 commit，這一行沒有跟著改。
 
@@ -73,7 +73,7 @@ curl -X PUT "http://localhost:12345/api/class/associations/$ASSOC_ID" \
 
 > **訂正（2026-09-05，實機跑過之後，改過兩次）**：實機要求 900／40，標籤落在 866／34 —— 偏了半個標籤，不是一像素。「不必再靠匯出觸發重繪」成立，實機驗過了。
 >
-> 這裡原本寫「反函式少算一次中心換左上角」。**那個歸因是錯的**，換算一直都在（`api-handler.js:5777`）。它缺的是尺寸：`View` 的建構式不指派 `width` 與 `height`，標籤要等 `LabelView.arrange` 用 canvas 量過文字才有尺寸。所以一個剛建立、還沒繪製的標籤，`view.width` 是 undefined，換算取 0 等於沒換算，而 `arrangeObject` 減的是量測後的真實半寬。
+> 這裡原本寫「反函式少算一次中心換左上角」。**那個歸因是錯的**，換算一直都在（`api-handler.js:5777`）。它缺的是尺寸：`View` 的建構式不指派 `width` 與 `height`，標籤要等 `LabelView.arrange` 用 canvas 量過文字才有尺寸。所以一個剛建立、還沒繪製的標籤沒有可用的寬度，`(view.width || 0)` 取 0，換算等於沒做，而 `arrangeObject` 減的是量測後的真實半寬。標籤的寬度就是它文字的寬度 —— 你們專案裡那些沒有名稱的關聯，標籤畫過無數次，`width` 仍然是 0。
 >
 > **已修**：寫 `left`／`top` 而尺寸還不存在時，先畫一次圖再讀尺寸。已經有尺寸的標籤走原本的路。**只有離線測試驗過，實機沒重跑。** 細節見第四節第三點與 `test/GAP-VERIFICATION.md` 的「Fixed after run 4」。下面的內容保留原樣，只在最後一段標出哪一句被推翻。
 

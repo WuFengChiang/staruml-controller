@@ -11,7 +11,10 @@ Four runs, each against different code:
 | 1 | 2026-08-31 | the seven gap fixes | 12 pass, 3 fail | 428 / 0 |
 | 2 | 2026-09-01 | plus the six review findings | 29 / 0 | **aborted** |
 | 3 | 2026-09-01 | plus the serializer fix run 2 exposed | 29 / 0 | 428 / 0 |
-| 4 | 2026-09-05 | plus the twelve A/B/C gap-report fixes | 71 pass, 4 fail | 426 / 2, 2 skipped |
+| 4 | 2026-09-05 | plus the twelve A/B/C gap-report fixes, at commit `7d26191` | 71 pass, 4 fail | 426 / 2, 2 skipped |
+
+The commits after `7d26191` have no live run at all. They answer run 4's
+failures, and what they are is in "Fixed after run 4" below.
 
 Run 1's three failures were all faults in the check, not in the fix; they are
 fixed and run 2 covers what they were meant to.
@@ -120,12 +123,13 @@ that leaves unproven.
 
 ### A-2 converts left/top with a size the label does not have yet
 
-> **This section was wrong when first written, on 2026-09-05.** It said the
-> controller's inverse "skips the subtraction" of half the label's width and
-> height. It does not — the conversion is at api-handler.js:5777 and always was.
-> That claim came from reading the snapshot's numbers and never opening the four
-> lines that do the work. What follows replaces it, and the fix follows from the
-> corrected reading rather than the original one.
+> **This section was wrong when first written, in commit `473b6db` earlier the
+> same day.** It said the controller's inverse "skips the subtraction" of half
+> the label's width and height. It does not — the conversion is at
+> api-handler.js:5777 and always was. That claim came from reading the snapshot's
+> numbers and never opening the four lines that do the work. What follows
+> replaces it, and the fix follows from the corrected reading rather than the
+> original one.
 
 The controller takes a requested `left`/`top`, converts it to the centre
 `arrangeObject` measures from, inverts StarUML's geometry to recover
@@ -133,12 +137,18 @@ The controller takes a requested `left`/`top`, converts it to the centre
 What it lacked was a size to convert with.
 
 `View`'s constructor assigns neither `width` nor `height` (`class View` in
-`app.asar`, idx 23646704 — the constructor sets model, subViews, colours and
-font, and no geometry). A label gets its size from `LabelView.arrange`, which
-measures the text on a canvas (idx 23693980). So on a label that has never been
-drawn, `view.width` is undefined, the controller's `(view.width || 0)` takes
-zero, and the conversion moves the point nowhere. `arrangeObject` then subtracts
-the real half-width and half-height, and the label lands that much short.
+`app.asar`, idx 23646704 — it sets model, subViews, colours and font, and no
+geometry). A label gets its size from `LabelView.arrange`, which measures the
+text on a canvas (idx 23693980). Before that measurement `view.width` is absent,
+the controller's `(view.width || 0)` takes zero, and the conversion moves the
+point nowhere. `arrangeObject` then subtracts the real half-width and
+half-height, and the label lands that much short.
+
+A label's width is its text's width, which is worth knowing before reading the
+next table: on the user's real project, edge labels that have been drawn many
+times still answer `width: 0, height: 13`, because those associations have no
+name and the labels have nothing to render. The label in this run said
+`+labelled`, and measured 70.21 x 13.
 
 Which of the two it was is a matter of arithmetic. The live label measured
 70.21 x 13 after the draw:
@@ -154,9 +164,21 @@ this one state — the second only reads the same pair back out of the `.mdj`.
 
 **The fix** (api-handler.js:5764) draws the diagram once before reading the
 size, and only when the size is missing, so a label that already has one behaves
-exactly as before. `arrangeDiagram` is `editor.repaint()`, which measures
-without touching the undo stack. The anchor is now read after that draw, because
-a repaint can move the host edge's points.
+exactly as before. The anchor is now read after that draw, because a repaint can
+move the host edge's points.
+
+That the draw is enough to produce a size is not an assumption. `repaint()` is
+`drawBackground` followed by `diagram.drawDiagram(this.canvas)` (idx 2214580),
+which is the call chain `LabelView.arrange` measures inside — and the 70.21 in
+this run's own snapshot is that measurement, taken during the repaint
+`Engine.moveParasiticView` performs. The fix reaches that repaint through
+`arrangeDiagram`, which resolves its editor with the same `editorForDiagram`
+`moveParasiticView` is handed. Same editor, same draw, same measurement — only
+early enough to convert with.
+
+What is still unproven is narrower: **no live run has confirmed the label now
+lands on the request.** The mechanism is accounted for; the round trip through
+the real engine is not.
 
 **Why the offline tests could not see it.** Not because the mock is wrong:
 `test/mock-staruml.js` copies `arrangeObject` faithfully, half-width subtraction
@@ -245,7 +267,7 @@ the whole of the evidence.
 
 | What | Change | How far it is proven |
 |---|---|---|
-| A-2's missing size | api-handler.js:5764 draws once before reading `width`/`height`, and only when they are absent | offline: a never-drawn label now lands on the request, and fails at 365/113 with the fix reverted |
+| A-2's missing size | api-handler.js:5764 draws once before reading `width`/`height`, and only when they are absent | offline: a never-drawn label now lands on the request, and fails at 365/113 with the fix reverted. The draw does measure — same editor and same `drawDiagram` that produced the 70.21 in run 4's snapshot — but no live run has watched the label land |
 | C-4's unreadable index | `attachMessagePlace` serves `messageIndex` from GET as well as create and update, one function for all three | offline suite unaffected; the ordering claim itself still needs a live run |
 | A-1's bound view count | the check asserts the `UMLAssociationView` survived and the count did not shrink, rather than an exact match | not re-run |
 | suite 138a/138b | a new `check_refused` helper expects the refusal and matches the reason | not re-run |
