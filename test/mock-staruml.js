@@ -273,7 +273,41 @@ class EdgeParasiticView extends ParasiticView {
         this.edgePosition = 0
     }
 }
-class EdgeLabelView extends EdgeParasiticView {}
+// A real label carries no size until it has been drawn: View's constructor
+// assigns neither width nor height, and LabelView.arrange is what fills them in,
+// by measuring the text on a canvas (app.asar, LabelView.arrange). NodeView here
+// starts everything at 0 for the benefit of the other tests, so a label that has
+// never been drawn has to say so explicitly — `_measured` is that flag, and
+// `measure()` stands in for the textExtent call.
+//
+// This matters because it is the state the offline suite could not reach. A test
+// that assigns width before writing left/top hands the controller a size the
+// live engine does not have yet, and the centre conversion then agrees with
+// itself. Live, the label was 70.2 x 13 after the draw and 866/34 instead of
+// 900/40 on the way in.
+const MOCK_LABEL_MEASURED = { width: 70.21142578125, height: 13 }
+
+class EdgeLabelView extends EdgeParasiticView {
+    constructor() {
+        super()
+        this._measured = false
+    }
+    /** Stand-in for LabelView.arrange's canvas.textExtent call. */
+    measure() {
+        if (this._measured) {
+            return
+        }
+        this._measured = true
+        // A test that set a size on purpose keeps it; only an unmeasured label
+        // takes the stand-in numbers.
+        if (!(this.width > 0)) {
+            this.width = MOCK_LABEL_MEASURED.width
+        }
+        if (!(this.height > 0)) {
+            this.height = MOCK_LABEL_MEASURED.height
+        }
+    }
+}
 
 // Port of Coord.getPointAwayLine (app.asar). Do not "clean up" the arithmetic:
 // the controller's inverse is written against exactly this.
@@ -413,11 +447,22 @@ const redoStack = []
  */
 function repaintDiagram(diagram) {
     if (!diagram || !Array.isArray(diagram.ownedViews)) return
+    // Measure before arranging, in that order: LabelView.arrange sizes itself
+    // from its text and only then computes left/top from the polar pair. Arrange
+    // divides the width by two, so an unmeasured label would otherwise produce
+    // NaN here — which is exactly what the real engine never does, because it
+    // always measures first.
     diagram.ownedViews.forEach(function (v) {
         (v.subViews || []).forEach(function (sv) {
-            if (sv instanceof ParasiticView) arrangeParasitic(sv)
+            if (sv instanceof ParasiticView) {
+                if (typeof sv.measure === 'function') sv.measure()
+                arrangeParasitic(sv)
+            }
         })
-        if (v instanceof ParasiticView) arrangeParasitic(v)
+        if (v instanceof ParasiticView) {
+            if (typeof v.measure === 'function') v.measure()
+            arrangeParasitic(v)
+        }
     })
 }
 

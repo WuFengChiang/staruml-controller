@@ -857,6 +857,31 @@ labelEdge.points.add(new mock.Point(100, 20))
 labelEdge.points.add(new mock.Point(700, 20))
 label.edgePosition = 1
 
+// The case the live run failed on, and the one every check above stepped over:
+// a label created a moment ago, never drawn, with no measured size. The checks
+// above all assign width and height first, which hands the controller a size the
+// engine does not have yet — so the centre conversion agreed with itself and the
+// suite passed a formula the live engine refused (900/40 asked, 866/34 landed).
+const freshLabel = new t.EdgeLabelView()
+freshLabel.hostEdge = labelEdge
+freshLabel.edgePosition = 1
+freshLabel._parent = labelEdge
+labelEdge.subViews.push(freshLabel)
+mock.store.push(freshLabel)
+check('a label starts with no size, the way one does before its first draw',
+    !(freshLabel.width > 0) && !(freshLabel.height > 0),
+    { width: freshLabel.width, height: freshLabel.height })
+
+r = api.route('PUT', '/api/views/' + freshLabel._id, { left: 400, top: 120 })
+check('writing left/top on a never-drawn label is accepted', r.success === true, r)
+check('and it lands where it was asked, not half a label short',
+    Math.abs(freshLabel.left - 400) <= 1 && Math.abs(freshLabel.top - 120) <= 1,
+    { left: freshLabel.left, top: freshLabel.top,
+      width: freshLabel.width, height: freshLabel.height })
+check('the label was measured on the way through, so arrange had a real size',
+    freshLabel.width > 0 && freshLabel.height > 0,
+    { width: freshLabel.width, height: freshLabel.height })
+
 const plainView = holderView
 r = api.route('PUT', '/api/views/' + plainView._id, { left: 15, top: 25 })
 check('a plain node view is unaffected by the parasitic path',

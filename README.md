@@ -356,16 +356,23 @@ Arrange floors its arithmetic twice, so a requested `left` of 900 can settle at
 899. That one pixel is reported in `clamped`; it is never rounded away into a
 claim the write landed exactly.
 
-> **Corrected 2026-09-05, after the first live run.** The paragraph above
-> understates the error, and the label does **not** land where you ask. A live
-> request for `left: 900, top: 40` settled at 866/34 — off by half the label's
-> own width and height, not by a pixel. The conversion recovers `alpha` and
-> `distance` as though the requested `left`/`top` were the label's centre, but
-> `arrangeObject` treats what it derives as the centre and subtracts half the
-> width and half the height to reach the top-left corner. Everything else in
-> this section holds: the write does reach the model and the `.mdj` with no
-> export step. See "Run 4" in `test/GAP-VERIFICATION.md`. Whether `clamped`
-> reports the 34-pixel gap was not checked.
+> **Corrected 2026-09-05, after the first live run — twice.** The first live run
+> asked for `left: 900, top: 40` and got 866/34: off by half the label, not by a
+> pixel. A note here then blamed the conversion for never subtracting that half.
+> That was wrong, and this replaces it.
+>
+> The conversion was always there. What it needed was a size, and a label has
+> none until it has been drawn: `View`'s constructor assigns no `width` or
+> `height`, and `LabelView.arrange` is what fills them in by measuring the text
+> on a canvas. On a label created a moment earlier, `width` was undefined, the
+> conversion took it as zero and moved the point nowhere, and arrange then
+> subtracted the real half-width the request had never accounted for.
+>
+> **Fixed.** A `left`/`top` request on a view with no measured size now draws the
+> diagram first, so the size is the one arrange is about to use. A label that
+> already has a size is untouched by this. Verified offline only — see "Fixed
+> after run 4" in `test/GAP-VERIFICATION.md`. Whether `clamped` reported the
+> 34-pixel gap was never checked.
 
 `alpha` and `distance` still work and are still the values StarUML stores. Note
 what that means for a hand-placed label: dragging one on the canvas writes
@@ -521,16 +528,17 @@ draws the diagram before answering and reports the resulting `messageIndex` and
 `messageCount`. Before, a moved message kept its old place in the list and the
 numbering on screen disagreed with the model.
 
-> **Corrected 2026-09-05.** `messageIndex` and `messageCount` come back from
-> `POST /api/seq/interactions/:id/messages` and `PUT /api/seq/messages/:id`
-> only. **`GET /api/seq/messages/:id` does not report them** — they are attached
-> in `createMessage` and `updateMessage` and nowhere else. The endpoint table
-> below used to list GET alongside PUT, which is why the live check tried to read
-> one message's position from a PUT response and the other's from a GET, and had
-> nothing to compare. That left the re-sorting claim in this section
-> **unverified against the live engine**: the write is accepted and reports an
-> index, but no run has yet confirmed the list order changed. See "Run 4" in
-> `test/GAP-VERIFICATION.md`.
+> **Corrected 2026-09-05.** This table used to say `GET /api/seq/messages/:id`
+> reported `messageIndex`. It did not — the field was attached in
+> `createMessage` and `updateMessage` and nowhere else. The live check was
+> written against that sentence, so it read one message's position from a PUT
+> and the other's from a GET that answered `null`, and had nothing to compare.
+>
+> The GET route now serves it too, from the same `attachMessagePlace` the other
+> two use. But the check has not been re-run, so the re-sorting claim in this
+> section is **still unverified against the live engine**: the write is accepted
+> and reports an index, and no run has yet confirmed the list order changed. See
+> "Run 4" in `test/GAP-VERIFICATION.md`.
 
 ## The Server and Modal Dialogs
 
@@ -635,7 +643,7 @@ something is waiting for a button.
 | `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines. POST takes `representTypeId`/`representTypeName` to set what the lifeline stands for |
 | `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline. PUT takes `representTypeId` (a classifier's id, or `null` to clear) or `representTypeName` (a bare type name) |
 | `/api/seq/interactions/:id/messages` | GET / POST | List or create messages. POST takes `signature` (the UMLOperation or UMLSignal the message invokes) and `arguments`, `guard`, `sequenceNumber`, `iteration`, `assignmentTarget`, `isConcurrentIteration` |
-| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `signature` and the other UMLMessage fields, plus `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`. GET and PUT return the view geometry in `data.view`, and the operation's name and parameter count when a signature is set. PUT also reports the message's place in the list as `messageIndex` — GET does not (corrected 2026-09-05; see "Moving a Message") |
+| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `signature` and the other UMLMessage fields, plus `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`. GET and PUT return the view geometry in `data.view`, the message's place in the list as `messageIndex`, and the operation's name and parameter count when a signature is set. GET reports `messageIndex` as of 2026-09-05 — before that only create and update did (see "Moving a Message") |
 | `/api/seq/interactions/:id/combined-fragments` | GET / POST | List or create combined fragments |
 | `/api/seq/combined-fragments/:id` | GET / PUT / DELETE | Get, update, or delete combined fragment |
 | `/api/seq/combined-fragments/:id/operands` | GET / POST | List or add operands |

@@ -114,34 +114,62 @@ and two of the six are a real defect in this build.
 Two suite cases were skipped for want of a BPMN start event and a link object.
 Neither is related to this change set.
 
-### A-2 puts the label's centre where its top-left was asked for
+The verdicts above are what run 4 measured. All six have since been acted on —
+see "Fixed after run 4" at the end of this section for what changed and what
+that leaves unproven.
 
-This is the one to fix. The controller takes a requested `left`/`top`, inverts
-StarUML's `arrangeObject` to recover the polar pair the engine actually stores,
-and writes `alpha`/`distance`. The engine re-derives `left`/`top` from that pair
-— and the check asked for 900/40 but read back 866/34.
+### A-2 converts left/top with a size the label does not have yet
 
-The gap is exactly half the label. In the run's own snapshot the `+labelled`
-view carries `width: 70.21` and `height: 13`, and:
+> **This section was wrong when first written, on 2026-09-05.** It said the
+> controller's inverse "skips the subtraction" of half the label's width and
+> height. It does not — the conversion is at api-handler.js:5777 and always was.
+> That claim came from reading the snapshot's numbers and never opening the four
+> lines that do the work. What follows replaces it, and the fix follows from the
+> corrected reading rather than the original one.
 
-    left + width / 2  = 901.1     (asked for 900)
-    top  + height / 2 = 40.5      (asked for 40)
+The controller takes a requested `left`/`top`, converts it to the centre
+`arrangeObject` measures from, inverts StarUML's geometry to recover
+`alpha`/`distance`, and writes those. The conversion is present and correct.
+What it lacked was a size to convert with.
 
-`arrangeObject` derives the label's **centre** from alpha and distance, then
-subtracts half the width and half the height to get the top-left corner. The
-controller's inverse skips that subtraction, so it hands the engine a polar pair
-that lands the centre where the caller wanted the corner. Both A-2 failures are
-that one omission — the second merely reads the same wrong pair back out of the
-`.mdj` — so correcting the arithmetic closes both.
+`View`'s constructor assigns neither `width` nor `height` (`class View` in
+`app.asar`, idx 23646704 — the constructor sets model, subViews, colours and
+font, and no geometry). A label gets its size from `LabelView.arrange`, which
+measures the text on a canvas (idx 23693980). So on a label that has never been
+drawn, `view.width` is undefined, the controller's `(view.width || 0)` takes
+zero, and the conversion moves the point nowhere. `arrangeObject` then subtracts
+the real half-width and half-height, and the label lands that much short.
 
-**Why 133 offline tests missed it.** `test/mock-staruml.js` copies the real
-`arrangeObject` faithfully, half-width subtraction included (lines 304–305 and
-328–329). But its `View` constructor sets `width = 0` and `height = 0`, and no
-test gives a label a size. Subtracting half of zero changes nothing, so an
-inverse that drops the term still round-trips to the origin: all 18 edge
-directions and anchor combinations agreed with a formula that is wrong the
-moment a label has a width. **A round trip only proves the inverse if the
-forward function was exercised with the terms it actually carries.**
+Which of the two it was is a matter of arithmetic. The live label measured
+70.21 x 13 after the draw:
+
+| size at write time | where the label should land | live result |
+|---|---|---|
+| `width` already 70.21 | 900 / 40 — the request | — |
+| `width` still undefined | 865 / 34 | **866 / 34** |
+
+The second line matches, `top` exactly and `left` within the one pixel the two
+`Math.floor` calls account for. The first is out by 34. Both A-2 failures are
+this one state — the second only reads the same pair back out of the `.mdj`.
+
+**The fix** (api-handler.js:5764) draws the diagram once before reading the
+size, and only when the size is missing, so a label that already has one behaves
+exactly as before. `arrangeDiagram` is `editor.repaint()`, which measures
+without touching the undo stack. The anchor is now read after that draw, because
+a repaint can move the host edge's points.
+
+**Why the offline tests could not see it.** Not because the mock is wrong:
+`test/mock-staruml.js` copies `arrangeObject` faithfully, half-width subtraction
+included (lines 304–305 and 328–329). Because every A-2 test assigned
+`label.width = 60` before writing a position. That hands the controller a size
+the live engine does not have yet, so the conversion had real numbers to work
+with and the round trip closed — all 18 edge directions and anchor combinations
+included.
+
+The blind spot was the state, not the arithmetic: **no test had ever written a
+position to a label that had not been drawn.** One does now, and the mock
+reproduces the engine's order of operations — measure, then arrange. With the
+fix reverted it fails the way the live run did: 400/120 asked, 365/113 landed.
 
 ### A-1's check binds the view count, and four is the normal number
 
@@ -209,6 +237,23 @@ would not be disturbed. That comparison walked the four behaviours the change
 set altered on purpose, and never asked which previously-passing cases the new
 null check would flip. Two of them flipped.
 
+### Fixed after run 4
+
+All six failures were acted on the same day. **None of it has been back through
+the live engine** — the offline suite is 137/0 with these changes, and that is
+the whole of the evidence.
+
+| What | Change | How far it is proven |
+|---|---|---|
+| A-2's missing size | api-handler.js:5764 draws once before reading `width`/`height`, and only when they are absent | offline: a never-drawn label now lands on the request, and fails at 365/113 with the fix reverted |
+| C-4's unreadable index | `attachMessagePlace` serves `messageIndex` from GET as well as create and update, one function for all three | offline suite unaffected; the ordering claim itself still needs a live run |
+| A-1's bound view count | the check asserts the `UMLAssociationView` survived and the count did not shrink, rather than an exact match | not re-run |
+| suite 138a/138b | a new `check_refused` helper expects the refusal and matches the reason | not re-run |
+
+What a live run would still settle: whether A-2 now lands within the one pixel
+the floors allow, and whether the interaction's message list really does
+re-sort. Until then, treat both as offline-only.
+
 ## Not covered
 
 - **The nine types restored to a list endpoint.** `test/test_offline_units.js`
@@ -222,10 +267,9 @@ null check would flip. Two of them flipped.
   second message's position back, so nothing has yet shown that the interaction's
   message list re-sorts. See "C-4's ordering claim is still unverified" above.
 
-- **A-2's label placement, once corrected.** Run 4 found the inverse off by half
-  the label. Whatever fixes it needs a run of its own, with a mock label that has
-  a non-zero width — otherwise the offline suite will agree with the fix for the
-  same reason it agreed with the defect.
+- **A-2's label placement, now that it is corrected.** The fix is in and the
+  offline suite covers the state that produced the failure, but no live run has
+  confirmed a never-drawn label lands on its request against the real engine.
 
 ## Known, not addressed
 

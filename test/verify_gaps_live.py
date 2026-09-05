@@ -494,9 +494,19 @@ if c1 and c2:
         check("the association kept its id — no delete-and-rebuild",
               rb.get("_id") == a3["_id"], rb.get("_id"))
         after_views = api("GET", "/api/elements/%s/views" % enc(a3["_id"])).get("data") or []
+        # An association on a canvas is one UMLAssociationView plus three
+        # EdgeLabelViews, and the labels only reach the index getViewsOf walks
+        # once the diagram has been drawn. `before` is read immediately after the
+        # create, so it sees 1 and the run after the move sees 4 — the earlier
+        # version of this check bound the two counts together and failed on that.
+        # What a delete-and-rebuild would destroy is the edge view itself, so
+        # that is what to assert.
+        after_types = [v.get("viewType") for v in after_views]
         check("and its views were not destroyed",
-              len(after_views) == len(before_views) and len(after_views) > 0,
-              {"before": len(before_views), "after": len(after_views)})
+              len(after_views) >= len(before_views) and
+              "UMLAssociationView" in after_types,
+              {"before": len(before_views), "after": len(after_views),
+               "types": after_types})
 
         doc = save_and_load()
         if doc:

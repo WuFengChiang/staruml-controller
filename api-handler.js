@@ -3836,16 +3836,30 @@ function createMessage(interactionId, body, reqInfo) {
 
     const data = serializeMessage(msg)
     data.view = serializeMessageView(view)
-    if (msg._parent && Array.isArray(msg._parent.messages)) {
-        data.messageIndex = msg._parent.messages.indexOf(msg)
-        data.messageCount = msg._parent.messages.length
-    }
+    attachMessagePlace(data, msg)
     return attachWriteReport({
         success: true,
         message: appendWriteWarnings('Created ' + msgType + ' "' + (msg.name || msg._id) + '" with view on diagram "' + diagram.name + '"', report),
         request: Object.assign({}, reqInfo, { body: body }),
         data: data
     }, report)
+}
+
+/**
+ * Where a message sits in its interaction's list, so a caller can check the
+ * order without a second request.
+ *
+ * One function because three routes report it — create, update and get. Get was
+ * left out at first while README's endpoint table said it was there, and the
+ * live check written against that table could not compare two messages'
+ * positions: one came from a PUT and the other from a GET that answered null.
+ */
+function attachMessagePlace(data, msg) {
+    if (msg._parent && Array.isArray(msg._parent.messages)) {
+        data.messageIndex = msg._parent.messages.indexOf(msg)
+        data.messageCount = msg._parent.messages.length
+    }
+    return data
 }
 
 function getMessage(id, reqInfo) {
@@ -3858,6 +3872,7 @@ function getMessage(id, reqInfo) {
     if (view) {
         data.view = serializeMessageView(view)
     }
+    attachMessagePlace(data, msg)
     return {
         success: true,
         message: 'Retrieved message "' + (msg.name || msg._id) + '"',
@@ -4112,12 +4127,7 @@ function updateMessage(id, body, reqInfo) {
     if (msgView) {
         data.view = serializeMessageView(msgView)
     }
-    // Where the message now sits in its interaction's list, so a caller can
-    // check the order without a second request.
-    if (msg._parent && Array.isArray(msg._parent.messages)) {
-        data.messageIndex = msg._parent.messages.indexOf(msg)
-        data.messageCount = msg._parent.messages.length
-    }
+    attachMessagePlace(data, msg)
 
     return attachWriteReport({
         success: true,
@@ -5762,6 +5772,28 @@ function polarFromAnchor(p1, p2, p) {
  * geometry actually became.
  */
 function moveParasiticGeometry(view, body, report) {
+    // A left/top request needs the view's real size. arrangeObject derives the
+    // label's centre from alpha/distance, then subtracts half the width and half
+    // the height to reach left/top, so the conversion below has to subtract the
+    // same halves going the other way.
+    //
+    // The catch is when those halves are not known yet. View's constructor
+    // assigns neither width nor height, and a label only gets them from
+    // LabelView.arrange, which measures its text on a canvas. Before the first
+    // draw `view.width` is undefined, `|| 0` takes zero, and the conversion
+    // quietly does nothing — arrange then subtracts the real half-width the
+    // caller's number never accounted for, and the label lands half its own
+    // width and height short. Measured on the live engine: a request for
+    // left 900, top 40 settled at 866, 34 on a 70.2 x 13 label.
+    //
+    // So draw first, and let the size be the one arrange is about to use. The
+    // anchor is read after the draw for the same reason: a repaint can move the
+    // host edge's points.
+    if ((body.left !== undefined || body.top !== undefined) &&
+        !(view.width > 0 && view.height > 0)) {
+        arrangeDiagram(diagramOfView(view))
+    }
+
     const anchor = parasiticAnchor(view)
     if (!anchor) {
         return 'This ' + view.constructor.name + ' has no host geometry to measure against, so its position cannot be set. ' +
