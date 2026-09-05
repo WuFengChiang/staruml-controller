@@ -4,16 +4,21 @@ Measured against StarUML 6 with the extension reloaded, on an empty scratch
 project. Recorded here because the numbers are easy to lose and easy to
 misquote: each row below says which layer produced it.
 
-Three runs, each against different code:
+Four runs, each against different code:
 
 | # | Date | Build | Gap checks | Endpoint suite |
 |---|---|---|---|---|
 | 1 | 2026-08-31 | the seven gap fixes | 12 pass, 3 fail | 428 / 0 |
 | 2 | 2026-09-01 | plus the six review findings | 29 / 0 | **aborted** |
 | 3 | 2026-09-01 | plus the serializer fix run 2 exposed | 29 / 0 | 428 / 0 |
+| 4 | 2026-09-05 | plus the twelve A/B/C gap-report fixes | 71 pass, 4 fail | 426 / 2, 2 skipped |
 
 Run 1's three failures were all faults in the check, not in the fix; they are
 fixed and run 2 covers what they were meant to.
+
+Run 4's six failures are not the same story, and that difference matters: two of
+them are a real defect in this build. They are worked through under "Run 4"
+below. Do not read run 1's precedent onto them.
 
 Run 2 was killed after `GET /api/class/classes` stopped answering and stayed
 that way for six minutes. That was a real bug, described under "What the live
@@ -21,7 +26,8 @@ run found" below. Its 29/0 stands — the gap checks completed before the suite
 started — but its endpoint suite result does not exist, so nothing should quote
 one.
 
-Everything below describes run 3 unless it says otherwise.
+The "Results" and "What the live run found" sections below describe run 3. Run 4
+has its own section further down.
 
 ## Three layers, and what each one can and cannot show
 
@@ -88,6 +94,121 @@ the way out.
 Worth keeping in mind for the next fix in this area: **making a field writable
 can be what exposes a reader that was never asked to handle it.**
 
+## Run 4 — the twelve gap-report fixes, 2026-09-05
+
+The first time the A/B/C fixes in `docs/GAP-REPORT-REPLY-2026-09-05.md` met the
+real engine. Everything the earlier runs covered still holds: gaps 1 through 7,
+the attribute retype, A-3, B-1, B-2, B-3, C-1, C-2, C-3 and the sequence-diagram
+layout refusal all came back clean. What follows is the six checks that did not,
+and two of the six are a real defect in this build.
+
+| Check | What came back | Verdict |
+|---|---|---|
+| A-1 "its views were not destroyed" | `{"before": 1, "after": 4}` | the check is wrong |
+| A-2 "the label sits within a pixel of where it was asked" | `{"left": 866, "top": 34}`, asked for 900/40 | **a defect, not fixed** |
+| A-2 "left/top survived the save" | the same two numbers, read out of the `.mdj` | the same defect, one step later |
+| C-4 "both messages report a messageIndex" | `{"moved": 2, "other": null}` | the check reads a field the GET route does not serve |
+| suite 138a `gen_create_child(UMLInputPin)` | `StarUML created no element for type "UMLInputPin"` | the fix working as intended |
+| suite 138b `gen_create_child(UMLOutputPin)` | the same, for `outputs` | the same |
+
+Two suite cases were skipped for want of a BPMN start event and a link object.
+Neither is related to this change set.
+
+### A-2 puts the label's centre where its top-left was asked for
+
+This is the one to fix. The controller takes a requested `left`/`top`, inverts
+StarUML's `arrangeObject` to recover the polar pair the engine actually stores,
+and writes `alpha`/`distance`. The engine re-derives `left`/`top` from that pair
+— and the check asked for 900/40 but read back 866/34.
+
+The gap is exactly half the label. In the run's own snapshot the `+labelled`
+view carries `width: 70.21` and `height: 13`, and:
+
+    left + width / 2  = 901.1     (asked for 900)
+    top  + height / 2 = 40.5      (asked for 40)
+
+`arrangeObject` derives the label's **centre** from alpha and distance, then
+subtracts half the width and half the height to get the top-left corner. The
+controller's inverse skips that subtraction, so it hands the engine a polar pair
+that lands the centre where the caller wanted the corner. Both A-2 failures are
+that one omission — the second merely reads the same wrong pair back out of the
+`.mdj` — so correcting the arithmetic closes both.
+
+**Why 133 offline tests missed it.** `test/mock-staruml.js` copies the real
+`arrangeObject` faithfully, half-width subtraction included (lines 304–305 and
+328–329). But its `View` constructor sets `width = 0` and `height = 0`, and no
+test gives a label a size. Subtracting half of zero changes nothing, so an
+inverse that drops the term still round-trips to the origin: all 18 edge
+directions and anchor combinations agreed with a formula that is wrong the
+moment a label has a width. **A round trip only proves the inverse if the
+forward function was exercised with the terms it actually carries.**
+
+### A-1's check binds the view count, and four is the normal number
+
+`GET /api/elements/:id/views` answered 1 before the endpoint move and 4 after,
+and the check asserts the two are equal. Four is the right number, and 1 is the
+misleading one:
+
+- In the run's own snapshot, `moves` (the association whose end was moved) and
+  `labelled` (one that was never reconnected) **both** hold four views — one
+  `UMLAssociationView` plus three `EdgeLabelView`.
+- On the user's real project, an existing association untouched by any of this
+  answers 4 as well.
+
+Four is what an association on a canvas is made of: the line and its three
+labels. The check read `before` immediately after `POST /api/class/associations`,
+while the label subviews had not yet reached the index `getViewsOf` walks, so it
+captured 1 and froze that as the expected value. A-1's other four checks — the
+id survives, the reference reads back, it survives the save, and an end still
+cannot be pointed at a package — all passed. Nothing about A-1 is broken. The
+assertion should say the views survived, not that there are still exactly as
+many as happened to be visible a moment earlier.
+
+### C-4's ordering claim is still unverified
+
+`messageIndex` is attached in `createMessage` (api-handler.js:3840) and in
+`updateMessage` (api-handler.js:4118). `GET /api/seq/messages/:id` does not
+attach it. The check reads the moved message's index from the PUT response and
+the other message's from a GET, so it got `{"moved": 2, "other": null}` and had
+nothing to compare.
+
+C-4's central claim — that moving a message re-sorts `interaction.messages` —
+**was therefore not tested against the live engine.** What was tested is that
+the create call reports an index and that the move is accepted.
+
+The check was not careless: README's endpoint table said `GET` returned
+`messageIndex` alongside `PUT`, and the check was written against that sentence.
+The documentation was wrong, and this run is what caught it — that line is now
+corrected, in the table and in the "Moving a Message" section above it. Serving
+`messageIndex` from the GET route would close the same gap from the other side,
+and let the check do its job.
+
+### The two suite failures are the fix, not a regression
+
+Run 3 scored 428/0 and this run scored 426/2, which reads like something broke.
+It did not. `UMLInputPin` and `UMLOutputPin` are not registered with StarUML's
+model factory at all — `registerModelFn` in `app.asar` registers 90 types and
+not one of them contains "Pin" — so `app.factory.createModel` returns null for
+both, and always did.
+
+What changed is what the controller does with that null. Commit `f27fe41` added
+the check that refuses instead of reporting success. The `options` object, the
+`createModel` call, and the `CHILD_TYPE_DEFAULT_FIELDS` entries mapping
+`UMLInputPin` to `inputs` and `UMLOutputPin` to `outputs` are all context lines
+in that diff — unchanged. Before it, these two calls answered `success: true`
+and handed back an element the repository had never registered. `check()` in the
+suite reads `success` and nothing else, so the suite scored them as passes for
+as long as the lie held.
+
+**The suite's expectation for 138a/138b is now wrong and should be inverted.**
+Until it is, 426/2 is the passing score for this build.
+
+This also corrects a claim in `docs/GAP-REPORT-REPLY-2026-09-05.md`, which
+compared the change set against the suite statically and concluded the suite
+would not be disturbed. That comparison walked the four behaviours the change
+set altered on purpose, and never asked which previously-passing cases the new
+null check would flip. Two of them flipped.
+
 ## Not covered
 
 - **The nine types restored to a list endpoint.** `test/test_offline_units.js`
@@ -96,6 +217,15 @@ can be what exposes a reader that was never asked to handle it.**
   UMLStructuredActivityNode or a UMLTimeConstraint on a live engine and listed it
   back. Five of the nine are creatable through this API, so that check is
   writable; the other four are not, and would need a model built in the GUI.
+
+- **C-4's message reordering.** Run 4 accepted the move but could not read the
+  second message's position back, so nothing has yet shown that the interaction's
+  message list re-sorts. See "C-4's ordering claim is still unverified" above.
+
+- **A-2's label placement, once corrected.** Run 4 found the inverse off by half
+  the label. Whatever fixes it needs a run of its own, with a mock label that has
+  a non-zero width — otherwise the offline suite will agree with the fix for the
+  same reason it agreed with the defect.
 
 ## Known, not addressed
 

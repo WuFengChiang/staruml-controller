@@ -356,6 +356,17 @@ Arrange floors its arithmetic twice, so a requested `left` of 900 can settle at
 899. That one pixel is reported in `clamped`; it is never rounded away into a
 claim the write landed exactly.
 
+> **Corrected 2026-09-05, after the first live run.** The paragraph above
+> understates the error, and the label does **not** land where you ask. A live
+> request for `left: 900, top: 40` settled at 866/34 — off by half the label's
+> own width and height, not by a pixel. The conversion recovers `alpha` and
+> `distance` as though the requested `left`/`top` were the label's centre, but
+> `arrangeObject` treats what it derives as the centre and subtracts half the
+> width and half the height to reach the top-left corner. Everything else in
+> this section holds: the write does reach the model and the `.mdj` with no
+> export step. See "Run 4" in `test/GAP-VERIFICATION.md`. Whether `clamped`
+> reports the 34-pixel gap was not checked.
+
 `alpha` and `distance` still work and are still the values StarUML stores. Note
 what that means for a hand-placed label: dragging one on the canvas writes
 `alpha`/`distance` too, so a hand position is not lost when the diagram is
@@ -510,6 +521,17 @@ draws the diagram before answering and reports the resulting `messageIndex` and
 `messageCount`. Before, a moved message kept its old place in the list and the
 numbering on screen disagreed with the model.
 
+> **Corrected 2026-09-05.** `messageIndex` and `messageCount` come back from
+> `POST /api/seq/interactions/:id/messages` and `PUT /api/seq/messages/:id`
+> only. **`GET /api/seq/messages/:id` does not report them** — they are attached
+> in `createMessage` and `updateMessage` and nowhere else. The endpoint table
+> below used to list GET alongside PUT, which is why the live check tried to read
+> one message's position from a PUT response and the other's from a GET, and had
+> nothing to compare. That left the re-sorting claim in this section
+> **unverified against the live engine**: the write is accepted and reports an
+> index, but no run has yet confirmed the list order changed. See "Run 4" in
+> `test/GAP-VERIFICATION.md`.
+
 ## The Server and Modal Dialogs
 
 The HTTP server runs on StarUML's renderer thread, the same thread that draws
@@ -613,7 +635,7 @@ something is waiting for a button.
 | `/api/seq/interactions/:id/lifelines` | GET / POST | List or create lifelines. POST takes `representTypeId`/`representTypeName` to set what the lifeline stands for |
 | `/api/seq/lifelines/:id` | GET / PUT / DELETE | Get, update, or delete lifeline. PUT takes `representTypeId` (a classifier's id, or `null` to clear) or `representTypeName` (a bare type name) |
 | `/api/seq/interactions/:id/messages` | GET / POST | List or create messages. POST takes `signature` (the UMLOperation or UMLSignal the message invokes) and `arguments`, `guard`, `sequenceNumber`, `iteration`, `assignmentTarget`, `isConcurrentIteration` |
-| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `signature` and the other UMLMessage fields, plus `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`. GET and PUT return the view geometry in `data.view`, the message's place in the list as `messageIndex`, and the operation's name and parameter count when a signature is set |
+| `/api/seq/messages/:id` | GET / PUT / DELETE | Get, update, or delete message. PUT takes `signature` and the other UMLMessage fields, plus `y` (moves it and renumbers the sequence), `x` (found/lost messages only) and `activationHeight`. GET and PUT return the view geometry in `data.view`, and the operation's name and parameter count when a signature is set. PUT also reports the message's place in the list as `messageIndex` — GET does not (corrected 2026-09-05; see "Moving a Message") |
 | `/api/seq/interactions/:id/combined-fragments` | GET / POST | List or create combined fragments |
 | `/api/seq/combined-fragments/:id` | GET / PUT / DELETE | Get, update, or delete combined fragment |
 | `/api/seq/combined-fragments/:id/operands` | GET / POST | List or add operands |

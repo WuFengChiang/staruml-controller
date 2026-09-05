@@ -1,7 +1,9 @@
 # 回覆 YC_POS_SYS 的 controller 缺口清單
 
 日期：2026-09-05　　回覆對象：YC_POS_SYS 那一側（來信說模型檔在你們的 `spec/佑全新POS.mdj`，我這邊沒有那個檔）
-本次改動的分支：`integration/session-work`（尚未 commit）
+本次改動的分支：`fix/gap-report-2026-09-05`（從 `da4d6d8` 到 `7d26191`）
+
+> **訂正（2026-09-05）**：這一行原本寫「分支 `integration/session-work`（尚未 commit）」。那是動筆當下的狀態，改動後來另開分支並 commit，這一行沒有跟著改。
 
 A 級四條、B 級三條、C 級五條全部處理完，D 級查出確切機制但同程序內無解。
 下面先講三件你們的判斷需要修正的事，因為它們會改變你們接下來怎麼做；再逐項講改了什麼、怎麼呼叫、怎麼驗收。
@@ -69,6 +71,8 @@ curl -X PUT "http://localhost:12345/api/class/associations/$ASSOC_ID" \
 
 ### A-2　邊標籤的 left／top 可以直接寫，不必再靠匯出觸發重繪
 
+> **訂正（2026-09-05，實機跑過之後）**：這一節有一半不成立。「不必再靠匯出觸發重繪」成立，實機驗過了；**「標籤會落在你指定的位置」不成立** —— 反函式少算一次「中心換左上角」，標籤會偏掉半個自己的寬與高。細節見第四節第三點與 `test/GAP-VERIFICATION.md` 的 Run 4。下面的內容保留原樣，只在最後一段標出哪一句被推翻。
+
 一個邊標籤不存自己的位置。StarUML 每次重排都從 `alpha`（相對錨點的角度）與 `distance`（偏移量）重算 `left`／`top`，所以直接指派 `left`／`top` 才會被下一次重繪蓋掉。
 
 現在 `PUT /api/views/:id` 收 `left`／`top`，並且用**跟滑鼠拖曳完全相同的算式**換算：
@@ -84,6 +88,8 @@ curl -X PUT "http://localhost:12345/api/views/$LABEL_VIEW_ID" \
 標籤所在的圖如果不是編輯器正開著的那一張，這次繪製會走 StarUML 的隱藏編輯器 (hidden editor)，畫面上不會有任何變化。這是 StarUML 自己的版面外掛在用的做法。
 
 重排會做兩次 `Math.floor`，所以要求 900 有可能停在 899。那一像素會如實回報在 `clamped` 裡，不會被四捨五入成「寫進去了」。
+
+> **這一段被實機推翻。** 實機要求 900／40，得到的是 866／34 —— 差的不是一像素，是半個標籤（`width: 70.21`、`height: 13`）。誤差來自反函式少算一次「中心換左上角」，兩次 `Math.floor` 只解釋得了其中一像素。`clamped` 有沒有把這 34 像素報出來，這一輪沒有檢查，屬於待確認。
 
 `alpha`／`distance` 照舊可用，而且照舊是 StarUML 真正存的那兩個數字。
 
@@ -285,14 +291,20 @@ runner 現在也會先確認載入的是這一版：問 `GET /api/status/capabil
 
 ### 既有的 428 呼叫測試套件會不會被改壞
 
-不會。這一輪改了四個既有行為，我逐一對 `test/test_all_endpoints.sh` 查過：
+> **訂正（2026-09-05）**：這一節原本的答案是「不會」。實機跑過之後，這個答案是錯的 —— 428 項裡有兩項從通過翻成失敗。下面保留原本的靜態比對，那四點本身仍然成立；漏掉的部分補在後面。
+
+這一輪改了四個既有行為，我逐一對 `test/test_all_endpoints.sh` 查過：
 
 - 第 126 項 `gen_layout_diagram` 打的是 `UMLClassDiagram`，不在拒絕之列。
 - 第 127／128 項的 undo／redo 跑在一百多次寫入之後，堆疊不是空的，照舊回 `success: true`。
 - 整份套件沒有任何一處用 `/children` 建 `SysMLOperation`，也沒有寫 `alpha`／`distance`。
 - `handlers/family-composite.js` 的 `ports` 是一個**資源** (resource) 端點（列出 UMLPort），不是走 `field: 'ports'` 的子元素建立路徑，所以不受影響。`handlers/family-sysml.js` 的 operations 子元素用的是 `UMLOperation`，不是 `SysMLOperation`。
 
-這是靜態比對，不是實際跑過。實機那一輪見下一節。
+**上面四點漏掉的那一題。** 它們問的是「這一輪刻意改掉的行為，會不會踩到既有案例」，卻沒有問反過來的那一題：新增的檢查會不會讓原本通過的案例翻成失敗。第 138a／138b 項就是這樣翻的。
+
+那兩項用 `POST /api/elements/:id/children` 在 UMLAction 底下建 `UMLInputPin` 與 `UMLOutputPin`。StarUML 的 `registerModelFn` 註冊了 90 個型別，其中沒有任何一個帶 Pin，所以 `app.factory.createModel` 對這兩個型別一直都回 null —— 這不是這一輪造成的，一直如此。A-3 新增的 null 檢查只是把它如實回報成失敗。在那之前 controller 回的是 `success: true`，還交出一個 repository 從來沒登記過的元素；而套件的 `check()` 只讀 `success`，所以這個謊撐多久，這兩項就通過多久。
+
+也就是說 **426／2 才是這一版正確的成績**，套件對這兩項的預期要反過來寫。實機那一輪的完整結果見下一節與 `test/GAP-VERIFICATION.md` 的 Run 4。
 
 ---
 
@@ -301,7 +313,13 @@ runner 現在也會先確認載入的是這一版：問 `GET /api/status/capabil
 - **`diagram_create_view_of` 對泛化線回 `data: null`。** 你們提到它建成功了但回 null。這是 `createRelationView` 那條路徑，跟 A-3 的 `createChildElement` 不同，這一輪沒有動。要處理的話請單獨提，或告訴我這一條的優先序。
 - **MCP schema 改成自動產生。** C-5 這一輪是手動補齊的，兩份副本會再次分歧的根因還在。
 - **`UMLSlot` 的型別設不了，而且拒絕的理由原本寫錯。** 這是我在核對 README 的時候發現的，不在你們的清單裡。`checkFeatureFieldsSupported` 用 `instanceof UMLStructuralFeature` 當閘門，而 `UMLSlot` 繼承自 `UMLModelElement`，所以被擋掉——但 metamodel 明明給了它一個 `type`（`kind: var`，`UMLClassifier`，idx 58817287）。也就是說這是過嚴的拒絕，不是欄位不存在。README 原本寫「UMLSlot has no type property」，已經訂正並留下訂正紀錄。行為本身沒有動，因為沒有人要求，而放寬會改變既有語意。要的話請開一條。
-- **實機驗證還沒跑。** 這一輪的所有結論分成兩層：程式碼機制的部分有 `app.asar` 的出處，是查證過的；「寫進去了而且存得下來」的部分只有離線測試撐著，**實機那一輪還沒跑**。跑 `run_integration_safely.sh` 需要 StarUML 開著、伺服器啟動、而且擴充功能重新載入成這一版。這件事得在你們這邊或我這邊實際做一次，做完我會把結果補進 `test/GAP-VERIFICATION.md`。在那之前，A-1 到 B-3 的實機行為請當成**待確認**。
+- **實機驗證跑完了，其中 A-2 沒過。** 2026-09-05 在 StarUML 6 上跑 `run_integration_safely.sh`：缺口檢查 71 過 4 敗，端點套件 426 過 2 敗，另有 2 項因為前置條件不足略過。逐項歸因與證據記在 `test/GAP-VERIFICATION.md` 的 Run 4。四個缺口失敗分成三種：
+
+  - **A-2 是真的缺陷，還沒修。** 標籤的 left／top 要求 900／40，寫進去之後落在 866／34。差的正好是標籤的半寬與半高：快照裡這個標籤 `width: 70.21`、`height: 13`，而 `left + width/2 = 901.1`、`top + height/2 = 40.5`。`arrangeObject` 從 alpha／distance 算出來的是標籤的**中心**，再減掉半寬半高才是左上角；controller 的反函式少了這一步，等於把呼叫端要的左上角當成中心去反推。**在這一條修好之前，A-2 的「不必再靠匯出觸發重繪」成立，「標籤會落在你指定的位置」不成立。**
+  - **C-4 的順序主張沒驗到，仍是待確認。** `messageIndex` 只有 `POST` 與 `PUT` 的回應會帶，`GET /api/seq/messages/:id` 不帶，所以檢查讀不到第二則訊息的位置，無從比對。實機驗到的只有「建立時會回報位置」和「移動被接受」；「移動訊息會重排 `interaction.messages`」這一條還沒有實機證據。
+  - **另外兩個失敗是檢查寫得太嚴，不是修正有問題。** 一條關聯在圖上本來就是 4 個 view（1 條線加 3 個標籤），檢查卻把數量綁死在「搬動端點前讀到的那個數」，而那一次讀在標籤進入索引之前。你們專案裡一條沒被動過的關聯，同樣回 4 個。A-1 的其他四項全過。
+
+  其餘全部通過：原本的七條缺口、既有屬性改型別、A-1 的四項、A-3、A-4、B-1、B-2、B-3、C-1、C-2、C-3，以及 C-4 擋掉循序圖 layout 的那一項。
 
 ---
 
@@ -362,5 +380,7 @@ UML 2.5.1 §17.12.18.7 的 `signature_refer_to` 與 `signature_is_operation_requ
 
 ### 待確認
 
-- 這一輪所有改動的實機行為（見第四節第三點）。
+- 「移動訊息會重排 `interaction.messages`」（C-4）。實機跑過但沒驗到，原因見第四節第三點。
 - `diagram_create_view_of` 回 `data: null` 的原因（未探測）。
+
+> **訂正（2026-09-05）**：這一節原本第一條是「這一輪所有改動的實機行為（見第四節第三點）」。實機那一輪跑完之後，多數項目不再是待確認，只剩 C-4 的順序主張沒有證據。第一手結果見 `test/GAP-VERIFICATION.md` 的 Run 4。
