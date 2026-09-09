@@ -597,7 +597,8 @@ something is waiting for a button.
 | `/api/views/:id/style` | PUT | Update view style (fillColor, lineColor, autoResize, suppressAttributes, suppressOperations, etc.) |
 | `/api/views/:id/reconnect` | PUT | Reconnect edge to different source/target |
 | `/api/views/align` | POST | Align/distribute views |
-| `/api/project/save` | POST | Save project |
+| `/api/project/save` | POST | Save project. This is "save as": it repoints the open project at `path`, so every later save writes there too |
+| `/api/project/snapshot` | POST | Write the in-memory model to a separate `.mdj` without touching the open project. Leaves `project.filename` and the modified flag where they were, and returns `bytes` + `sha256` of what it wrote, so a caller can compare memory against the file on disk before deciding to save |
 | `/api/project/open` | POST | Open project |
 | `/api/project/new` | POST | Create new project |
 | `/api/project/close` | POST | Close project |
@@ -1138,10 +1139,20 @@ curl -X POST http://localhost:12345/api/erd/postgresql/ddl \
   -H "Content-Type: application/json" \
   -d '{"path": "/Users/xxx/output.sql"}'
 
-# Save project
+# Save project.
+# Careful: this is "save as". Afterwards the open project IS the new path, and
+# the file you started from stops receiving changes.
 curl -X POST http://localhost:12345/api/project/save \
   -H "Content-Type: application/json" \
   -d '{"path": "/Users/xxx/my-project.mdj"}'
+
+# Snapshot the in-memory model without changing the open project.
+# Use it to find out whether anyone has unsaved work before you save over their
+# file: snapshot to a scratch path, then compare the returned sha256 with the
+# sha256 of the .mdj on disk. Equal means memory and disk agree.
+curl -X POST http://localhost:12345/api/project/snapshot \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/tmp/snapshot.mdj"}'
 
 # Delete entity (blocked if referenced by other elements)
 curl -X DELETE http://localhost:12345/api/erd/entities/ENTITY_ID

@@ -2512,6 +2512,225 @@ function saveProject(body, reqInfo) {
     }
 }
 
+/**
+ * Read the modified flag, or null when this StarUML build does not expose it.
+ *
+ * Repository.isModified() is public API in the StarUML source, but reporting a
+ * flag we did not actually read would be worse than reporting nothing, so the
+ * caller gets null and skips the assertion instead of getting a made-up false.
+ */
+function readModifiedFlag() {
+    if (app.repository && typeof app.repository.isModified === 'function') {
+        return app.repository.isModified()
+    }
+    return null
+}
+
+/**
+ * Do two paths name the same file, even through symlinks?
+ *
+ * A plain resolve() comparison misses a symlink that points at the project
+ * file, and that is the one case the snapshot guard exists to catch. The
+ * snapshot target usually does not exist yet, so realpath is tried on the file
+ * first and falls back to the directory it would be created in.
+ */
+function isSamePath(a, b) {
+    const fs = require('fs')
+    const nodePath = require('path')
+    const real = function (p) {
+        try {
+            return fs.realpathSync(p)
+        } catch (e) {
+            try {
+                return nodePath.join(fs.realpathSync(nodePath.dirname(p)), nodePath.basename(p))
+            } catch (e2) {
+                return nodePath.resolve(p)
+            }
+        }
+    }
+    return real(a) === real(b)
+}
+
+const PROJECT_SNAPSHOT_ALLOWED_FIELDS = ['path']
+
+/**
+ * Write the in-memory model to a file without touching project state.
+ *
+ * app.project.save() does four things: serialise the model, write the file,
+ * reassign this.filename, and clear the modified flag. Only the first two
+ * belong in a snapshot. The last two are what make save() behave as "save as":
+ * after it runs, every later save writes to the new path, and the original file
+ * silently stops receiving changes. So this handler calls
+ * repository.writeObject() itself and writes the bytes itself, and never goes
+ * through app.project.save().
+ *
+ * Why writeObject() is safe to call directly: it builds a Writer, calls
+ * elem.save(writer) and returns JSON.stringify(writer.current). It assigns
+ * nothing and emits nothing.
+ *
+ * Sources (first-hand, read out of /Applications/StarUML.app app.asar):
+ *   src/engine/project-manager.js  save() lines 126-145, getFilename() line 60
+ *   src/core/repository.js         writeObject() line 1583, isModified() line 2066
+ *
+ * Every failure path returns success: false. A snapshot that reports success
+ * must mean the bytes are on disk and the project state is untouched, because a
+ * caller uses this endpoint to decide whether it is safe to save.
+ */
+function snapshotProject(body, reqInfo) {
+    const err = validate([
+        checkUnknownFields(body, PROJECT_SNAPSHOT_ALLOWED_FIELDS),
+        checkFieldType(body, 'path', 'string')
+    ])
+    if (err) {
+        return validationError(err, reqInfo, body)
+    }
+
+    if (!body.path) {
+        return validationError('Field "path" is required', reqInfo, body)
+    }
+
+    const nameErr = checkNonEmptyString(body, 'path')
+    if (nameErr) {
+        return validationError(nameErr, reqInfo, body)
+    }
+
+    // Validate absolute path (Unix: starts with /, Windows: starts with drive letter)
+    if (body.path.charAt(0) !== '/' && !/^[a-zA-Z]:[/\\]/.test(body.path)) {
+        return validationError('Field "path" must be an absolute path (e.g. "/Users/.../snapshot.mdj")', reqInfo, body)
+    }
+
+    // Validate .mdj extension
+    if (!/\.mdj$/i.test(body.path)) {
+        return validationError('Field "path" must have .mdj extension (e.g. "/Users/.../snapshot.mdj")', reqInfo, body)
+    }
+
+    const reqInfoWithBody = Object.assign({}, reqInfo, { body: body })
+
+    const project = app.project.getProject()
+    if (!project) {
+        return {
+            success: false,
+            error: 'No project is open, so there is no model to snapshot',
+            request: reqInfoWithBody
+        }
+    }
+
+    const fs = require('fs')
+    const nodePath = require('path')
+    const crypto = require('crypto')
+
+    const filenameBefore = app.project.getFilename()
+
+    // Report and write the same normalised path, so data.path always names the
+    // file the bytes actually went to.
+    const targetPath = nodePath.resolve(body.path)
+
+    // Writing over the open project's own file would make this a save, which is
+    // the single thing a snapshot must never be. The comparison follows
+    // symlinks, because a path that merely looks different can still land on
+    // the project file.
+    if (filenameBefore && isSamePath(targetPath, filenameBefore)) {
+        return {
+            success: false,
+            error: 'Field "path" must not be the open project file ("' + filenameBefore + '"). A snapshot writes a separate copy. Use POST /api/project/save to write the project itself.',
+            request: reqInfoWithBody
+        }
+    }
+
+    // Check the target directory before serialising 10+ MB of model, and report
+    // which of the two problems it is.
+    const dir = nodePath.dirname(targetPath)
+    let dirStat = null
+    try {
+        dirStat = fs.statSync(dir)
+    } catch (e) {
+        return {
+            success: false,
+            error: 'Directory does not exist: "' + dir + '". Create it first, or pass a path inside an existing directory.',
+            request: reqInfoWithBody
+        }
+    }
+    if (!dirStat.isDirectory()) {
+        return {
+            success: false,
+            error: 'Not a directory: "' + dir + '"',
+            request: reqInfoWithBody
+        }
+    }
+    try {
+        fs.accessSync(dir, fs.constants.W_OK)
+    } catch (e) {
+        return {
+            success: false,
+            error: 'Directory is not writable: "' + dir + '"',
+            request: reqInfoWithBody
+        }
+    }
+
+    const modifiedBefore = readModifiedFlag()
+
+    try {
+        const data = app.repository.writeObject(project)
+        const expectedBytes = Buffer.byteLength(data, 'utf8')
+        const expectedSha = crypto.createHash('sha256').update(data, 'utf8').digest('hex')
+
+        // 'utf8' matches what save() passes, so an unmodified project's snapshot
+        // is byte-identical to the file a save would have written.
+        fs.writeFileSync(targetPath, data, 'utf8')
+
+        // Read the bytes back rather than trusting the write. Reporting a hash
+        // we computed in memory would say nothing about what reached the disk.
+        const written = fs.readFileSync(targetPath)
+        const actualBytes = written.length
+        const actualSha = crypto.createHash('sha256').update(written).digest('hex')
+        if (actualBytes !== expectedBytes || actualSha !== expectedSha) {
+            return {
+                success: false,
+                error: 'Snapshot verification failed: serialised ' + expectedBytes + ' bytes (sha256 ' + expectedSha + '), but the file on disk holds ' + actualBytes + ' bytes (sha256 ' + actualSha + '). The file at "' + targetPath + '" is not a usable snapshot.',
+                request: reqInfoWithBody
+            }
+        }
+
+        // The point of this endpoint is that project state does not move. Check
+        // it rather than assert it.
+        const filenameAfter = app.project.getFilename()
+        if (filenameAfter !== filenameBefore) {
+            return {
+                success: false,
+                error: 'Snapshot changed the open project: project.filename moved from "' + filenameBefore + '" to "' + filenameAfter + '". The snapshot file was written, but the project state is no longer what it was.',
+                request: reqInfoWithBody
+            }
+        }
+        const modifiedAfter = readModifiedFlag()
+        if (modifiedBefore !== null && modifiedAfter !== modifiedBefore) {
+            return {
+                success: false,
+                error: 'Snapshot changed the project modified flag from ' + modifiedBefore + ' to ' + modifiedAfter + '. A snapshot is not a save and must not report the model as saved.',
+                request: reqInfoWithBody
+            }
+        }
+
+        return {
+            success: true,
+            message: 'Wrote a snapshot of the in-memory model to "' + targetPath + '" (' + actualBytes + ' bytes). The open project is unchanged.',
+            request: reqInfoWithBody,
+            data: {
+                path: targetPath,
+                bytes: actualBytes,
+                sha256: actualSha,
+                projectFilename: filenameAfter,
+                modified: modifiedAfter
+            }
+        }
+    } catch (e) {
+        return {
+            success: false,
+            error: 'Failed to write snapshot: ' + (e.message || String(e)),
+            request: reqInfoWithBody
+        }
+    }
+}
+
 function openProject(body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, PROJECT_OPEN_ALLOWED_FIELDS),
@@ -8585,6 +8804,7 @@ function buildCapabilities() {
             'POST /api/elements/:id/children',
             'POST /api/erd/postgresql/ddl',
             'POST /api/project/save',
+            'POST /api/project/snapshot',
             'POST /api/project/open',
             'POST /api/project/import',
             'POST /api/project/new',
@@ -9076,6 +9296,11 @@ function route(method, url, body) {
     // POST /api/project/save
     if (method === 'POST' && path === '/api/project/save') {
         return saveProject(body, reqInfo)
+    }
+
+    // POST /api/project/snapshot
+    if (method === 'POST' && path === '/api/project/snapshot') {
+        return snapshotProject(body, reqInfo)
     }
 
     // POST /api/project/open

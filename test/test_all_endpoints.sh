@@ -68,9 +68,29 @@ if [ -z "$STATUS" ]; then
     echo "Make sure StarUML is running and the server is started."
     exit 1
 fi
-echo "Connected. Saving project snapshot for restore..."
+echo "Connected. Taking a snapshot of the project for restore..."
 SNAPSHOT="/tmp/test_staruml_snapshot_$$.mdj"
-curl -s -X POST $BASE/api/project/save -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}" > /dev/null
+
+# Remember where the project actually lives, so the restore at the end can
+# reopen that file rather than the copy in /tmp.
+ORIGINAL_PROJECT=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['project']['filename'] or '')" 2>/dev/null)
+
+# Use project/snapshot, not project/save. save is "save as": it repoints the
+# open project at /tmp, so every later save in this session lands there and the
+# real .mdj silently stops receiving changes.
+SNAP_RESULT=$(curl -s -X POST $BASE/api/project/snapshot -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}")
+case "$SNAP_RESULT" in
+    *'"success": true'*) : ;;
+    *'Not found'*)
+        echo "ERROR: this build has no POST /api/project/snapshot, so the pre-test"
+        echo "       snapshot cannot be taken without repointing your project at /tmp."
+        echo "       Reload the extension with a build that has the endpoint."
+        exit 1 ;;
+    *)
+        echo "ERROR: could not snapshot the project for restore:"
+        echo "       $SNAP_RESULT"
+        exit 1 ;;
+esac
 echo "Starting tests..."
 echo ""
 
@@ -1542,11 +1562,20 @@ check "468.ov_delete_diagram" "$(curl -s -X DELETE $BASE/api/overview/diagrams/$
 # Restore project to pre-test state
 # =============================
 echo ""
-echo "Restoring project from snapshot..."
-curl -s -X POST $BASE/api/project/open -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}" > /dev/null
+if [ -n "$ORIGINAL_PROJECT" ]; then
+    echo "Restoring project by reopening $ORIGINAL_PROJECT ..."
+    curl -s -X POST $BASE/api/project/open -H "Content-Type: application/json" -d "{\"path\":\"$ORIGINAL_PROJECT\"}" > /dev/null
+    rm -f "$SNAPSHOT"
+else
+    # No file was open when the run started, so the snapshot is the only copy of
+    # the pre-test model. Open it, and keep it: deleting it would leave the
+    # project pointing at a file that no longer exists.
+    echo "Restoring project from $SNAPSHOT (no project file was open at the start, so this file is kept)..."
+    curl -s -X POST $BASE/api/project/open -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}" > /dev/null
+fi
 
 # Cleanup temp files
-rm -f /tmp/test_export.png /tmp/test_export.svg /tmp/test_export.jpeg /tmp/test_export.pdf /tmp/test_ddl.sql /tmp/test_fragment.mfj /tmp/test_staruml.mdj "$SNAPSHOT"
+rm -f /tmp/test_export.png /tmp/test_export.svg /tmp/test_export.jpeg /tmp/test_export.pdf /tmp/test_ddl.sql /tmp/test_fragment.mfj /tmp/test_staruml.mdj
 rm -rf /tmp/staruml_export_test /tmp/staruml_test_doc
 
 # =============================
