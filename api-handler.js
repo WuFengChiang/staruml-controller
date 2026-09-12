@@ -7,11 +7,12 @@
 
 const ddlGenerator = require('./ddl-generator')
 const crudFactory = require('./handlers/crud-factory')
+const edgeRouting = require('./handlers/edge-routing')
 const {
     autoExpandFrame, fitFrameToViews, clearEdgeWaypoints,
     createWriteReport, applyProperty, reportIgnoredWrite,
     writeReportMessage, appendWriteWarnings, attachWriteReport, writeValuesEqual,
-    diagramOfView, editorForDiagram, arrangeDiagram
+    diagramOfView, editorForDiagram, arrangeDiagram, pointsToArray
 } = require('./handlers/shared-helpers')
 
 // ============================================================
@@ -808,6 +809,18 @@ function serializeViewInfo(view) {
     if (view.model) {
         result.modelId = view.model._id
     }
+    // An edge is drawn from its points, not from left/top, and its line style
+    // decides how those points are recomputed on the next arrange. A caller that
+    // cannot read either one cannot tell what a write to them actually did.
+    if (view.lineStyle !== undefined) {
+        result.lineStyle = view.lineStyle
+    }
+    if (view.points) {
+        const pts = pointsToArray(view.points)
+        if (pts) {
+            result.points = pts
+        }
+    }
     if (view.left !== undefined) {
         result.left = view.left
     }
@@ -974,10 +987,24 @@ const NOTE_LINK_ALLOWED_FIELDS = ['noteId', 'targetId']
 const FREE_LINE_ALLOWED_FIELDS = ['x1', 'y1', 'x2', 'y2']
 // alpha/distance/edgePosition position a parasitic view (edge labels). They are
 // rejected for other view types by the guard in updateView.
-const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height', 'alpha', 'distance', 'edgePosition']
+const VIEW_UPDATE_FIELDS = ['left', 'top', 'width', 'height', 'alpha', 'distance', 'edgePosition', 'keepEdgeWaypoints']
 // EdgeParasiticView.EP_HEAD / EP_MIDDLE / EP_TAIL
 const VALID_EDGE_POSITIONS = [0, 1, 2]
 const EDGE_POSITION_LABELS = { 0: 'EP_HEAD', 1: 'EP_MIDDLE', 2: 'EP_TAIL' }
+// EdgeView.LS_RECTILINEAR / LS_OBLIQUE / LS_ROUNDRECT / LS_CURVE / LS_DIRECT.
+// The Format menu offers the first four. LS_DIRECT has no menu command, so an
+// edge set to it cannot be changed back from StarUML's own user interface —
+// it is accepted here because the engine draws it, not because the UI does.
+const VALID_LINE_STYLES = [0, 1, 2, 3, 4]
+const LINE_STYLE_LABELS = {
+    0: 'LS_RECTILINEAR',
+    1: 'LS_OBLIQUE',
+    2: 'LS_ROUNDRECT',
+    3: 'LS_CURVE',
+    4: 'LS_DIRECT'
+}
+const VIEW_POINTS_FIELDS = ['points']
+const EDGE_ROUTE_FIELDS = ['margin', 'grid']
 // `type` is accepted here as an alias of `typeName`, because POST
 // .../attributes has always taken `type` and both write the same property. The
 // two endpoints disagreeing on the spelling once produced a verification script
@@ -6082,7 +6109,8 @@ function updateView(id, body, reqInfo) {
         checkFieldType(body, 'height', 'number'),
         checkFieldType(body, 'alpha', 'number'),
         checkFieldType(body, 'distance', 'number'),
-        checkFieldType(body, 'edgePosition', 'number')
+        checkFieldType(body, 'edgePosition', 'number'),
+        checkFieldType(body, 'keepEdgeWaypoints', 'boolean')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -6090,6 +6118,12 @@ function updateView(id, body, reqInfo) {
 
     if (Object.keys(body).length === 0) {
         return validationError('At least one field must be provided. Allowed fields: ' + VIEW_UPDATE_FIELDS.join(', '), reqInfo, body)
+    }
+
+    // keepEdgeWaypoints only says what a move should not disturb. On its own
+    // there is no move, so it would report a successful write that did nothing.
+    if (Object.keys(body).length === 1 && body.keepEdgeWaypoints !== undefined) {
+        return validationError('Field "keepEdgeWaypoints" only applies alongside a move or resize. Send it with left, top, width or height.', reqInfo, body)
     }
 
     if (body.edgePosition !== undefined && VALID_EDGE_POSITIONS.indexOf(body.edgePosition) === -1) {
@@ -6166,7 +6200,14 @@ function updateView(id, body, reqInfo) {
     // Re-route connected edges when node position or size changes.
     // Parasitic geometry is deliberately excluded: it moves a label along its
     // host edge and must not discard hand-placed waypoints on that edge.
-    if (body.left !== undefined || body.top !== undefined || body.width !== undefined || body.height !== undefined) {
+    //
+    // `keepEdgeWaypoints` turns the clearing off. It defaults to false because
+    // clearing has been this endpoint's behaviour all along and README states
+    // it, but a caller that has placed a route with PUT .../points or
+    // POST .../route needs a way to move a box without losing that work. The
+    // engine still owns the two ends, so the route follows the box either way.
+    if ((body.left !== undefined || body.top !== undefined || body.width !== undefined || body.height !== undefined) &&
+        body.keepEdgeWaypoints !== true) {
         try {
             const connectedEdges = app.repository.getEdgeViewsOf(view)
             if (connectedEdges && connectedEdges.length > 0) {
@@ -7350,6 +7391,226 @@ function createChildElement(parentId, body, reqInfo) {
     }
 }
 
+/**
+ * Compare the route a caller asked for against the route the engine kept.
+ *
+ * The engine changes a written route in two ways, and they need telling apart.
+ *
+ * Losing a waypoint is the surprising one — EdgeView.reducePoints deletes any
+ * middle point that falls inside the tail or head box — so it goes in the
+ * message, where a caller reading a shorter array finds out why.
+ *
+ * Moving the two ends is not a surprise: every arrange snaps them to where the
+ * line meets the end boxes, so it happens on essentially every write. Saying so
+ * in the message each time would train callers to skim past the message, taking
+ * the dropped-waypoint warning with it. It goes in `endsSnappedByEngine`
+ * instead, a field that is always there and can be read when it matters.
+ */
+function describeRouteResult(requested, stored) {
+    const result = { notes: [], endsSnappedByEngine: false }
+    if (!stored) {
+        return result
+    }
+    if (stored.length !== requested.length) {
+        result.notes.push('asked for ' + requested.length + ' point(s), stored ' + stored.length +
+            ' — the engine drops waypoints that fall inside the tail or head view')
+    }
+    const endMoved = function (a, b) {
+        return !a || !b || !writeValuesEqual(a.x, b.x) || !writeValuesEqual(a.y, b.y)
+    }
+    result.endsSnappedByEngine = endMoved(requested[0], stored[0]) ||
+        endMoved(requested[requested.length - 1], stored[stored.length - 1])
+    return result
+}
+
+function edgePointsOf(view) {
+    return pointsToArray(view && view.points) || []
+}
+
+/**
+ * PUT /api/views/:id/points — replace an edge's route.
+ */
+function updateViewPoints(id, body, reqInfo) {
+    const err = validate([
+        checkUnknownFields(body, VIEW_POINTS_FIELDS)
+    ])
+    if (err) {
+        return validationError(err, reqInfo, body)
+    }
+    if (!Array.isArray(body.points)) {
+        return validationError('Field "points" is required and must be an array of {x, y}.', reqInfo, body)
+    }
+    if (body.points.length < 2) {
+        return validationError('An edge route needs at least two points: the tail end and the head end.', reqInfo, body)
+    }
+    for (let i = 0; i < body.points.length; i++) {
+        const p = body.points[i]
+        if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' ||
+            !isFinite(p.x) || !isFinite(p.y)) {
+            return validationError('points[' + i + '] must be an object with finite numeric x and y.', reqInfo, body)
+        }
+    }
+
+    const view = findById(id)
+    if (!view) {
+        return { success: false, error: 'View not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
+    }
+    if (!isEdgeView(view)) {
+        return validationError('Points are only supported for edge views. This view is a ' + view.constructor.name, reqInfo, body)
+    }
+
+    const writeErr = edgeRouting.setEdgePoints(view, body.points)
+    if (writeErr) {
+        return validationError(writeErr, reqInfo, body)
+    }
+
+    const stored = edgePointsOf(view)
+    const outcome = describeRouteResult(body.points, stored)
+
+    return {
+        success: true,
+        message: 'Updated edge route' + (outcome.notes.length > 0 ? ' (' + outcome.notes.join('; ') + ')' : ''),
+        request: Object.assign({}, reqInfo, { body: body }),
+        data: Object.assign(serializeViewInfo(view), {
+            endsSnappedByEngine: outcome.endsSnappedByEngine
+        })
+    }
+}
+
+/**
+ * POST /api/views/:id/route — work out a route that avoids the other views, and
+ * write it.
+ *
+ * The line style is left alone on purpose. Both recalcOblique and
+ * recalcRectilinear keep the middle points, so the right-angle route drawn here
+ * survives either one, and switching to LS_RECTILINEAR would run
+ * convObliqueToRectilinear over the result and rebuild it.
+ */
+function routeViewEdge(id, body, reqInfo) {
+    const err = validate([
+        checkUnknownFields(body, EDGE_ROUTE_FIELDS),
+        checkFieldType(body, 'margin', 'number'),
+        checkFieldType(body, 'grid', 'number')
+    ])
+    if (err) {
+        return validationError(err, reqInfo, body)
+    }
+    if (body.margin !== undefined && (body.margin < 0 || !isFinite(body.margin))) {
+        return validationError('Field "margin" must be zero or a positive number.', reqInfo, body)
+    }
+    if (body.grid !== undefined && (!(body.grid > 0) || !isFinite(body.grid))) {
+        return validationError('Field "grid" must be a positive number.', reqInfo, body)
+    }
+
+    const view = findById(id)
+    if (!view) {
+        return { success: false, error: 'View not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
+    }
+    if (!isEdgeView(view)) {
+        return validationError('Routing is only supported for edge views. This view is a ' + view.constructor.name, reqInfo, body)
+    }
+
+    const routed = edgeRouting.routeEdge(view, { margin: body.margin, grid: body.grid })
+    if (routed.error) {
+        return {
+            success: false,
+            error: routed.error,
+            request: Object.assign({}, reqInfo, { body: body })
+        }
+    }
+
+    const writeErr = edgeRouting.setEdgePoints(view, routed.points)
+    if (writeErr) {
+        return validationError(writeErr, reqInfo, body)
+    }
+
+    // No arrange here. Engine.modifyEdge repaints as part of its own work, and
+    // it computes the undoable operation from the state that repaint produced.
+    // A second draw afterwards would change geometry the operation has already
+    // been built from, leaving those changes outside undo.
+    const stored = edgePointsOf(view)
+    const outcome = describeRouteResult(routed.points, stored)
+
+    return {
+        success: true,
+        message: 'Routed edge around ' + routed.obstacleCount + ' view(s) with ' + stored.length + ' point(s)',
+        request: Object.assign({}, reqInfo, { body: body }),
+        data: Object.assign(serializeViewInfo(view), {
+            obstacleCount: routed.obstacleCount,
+            // What the router worked out, before the engine snapped the two
+            // ends to the box borders. `points` is what is stored; these two
+            // differ only at the ends.
+            requestedPoints: routed.points,
+            endsSnappedByEngine: outcome.endsSnappedByEngine
+        })
+    }
+}
+
+function describeLineStyles() {
+    return VALID_LINE_STYLES.map(function (v) { return v + '=' + LINE_STYLE_LABELS[v] }).join(', ')
+}
+
+function isEdgeView(view) {
+    return !!(view && type.EdgeView && view instanceof type.EdgeView)
+}
+
+/**
+ * Set an edge's line style the way StarUML's own Style editor does.
+ *
+ * Engine.setLineStyle arranges the edge after the write, so its points follow
+ * the new style, repaints, and records the labels that the re-arrange moved in
+ * the same undoable operation. Engine.setProperty — what the rest of this
+ * handler uses — writes the field alone and leaves the route to whatever
+ * redraws next, which on a diagram nobody has open is nothing at all.
+ *
+ * Two results are worth naming to the caller rather than reporting as a bare
+ * "ignored":
+ *
+ *   - A self-link (both ends on the same node) is forced back to
+ *     LS_RECTILINEAR by EdgeView.arrangeObject on every arrange. The value can
+ *     be written, and the very next draw discards it.
+ *   - With no editor to arrange against, the field is still written, but the
+ *     route stays as it was until something draws that diagram.
+ */
+function setEdgeLineStyle(report, view, requested) {
+    const before = view.lineStyle
+    const diagram = diagramOfView(view)
+    const editor = diagram ? editorForDiagram(diagram) : null
+
+    if (!editor || typeof app.engine.setLineStyle !== 'function') {
+        applyProperty(report, view, 'lineStyle', requested)
+        if (report.updated.indexOf('lineStyle') !== -1) {
+            report.updated.splice(report.updated.indexOf('lineStyle'), 1)
+            report.clamped.push({
+                field: 'lineStyle',
+                requested: requested,
+                actual: view.lineStyle,
+                reason: 'no editor was available to arrange the diagram, so the field is set but the route is unchanged until something draws it'
+            })
+        }
+        return
+    }
+
+    app.engine.setLineStyle(editor, [view], requested)
+    const after = view.lineStyle
+
+    if (writeValuesEqual(after, requested)) {
+        report.updated.push('lineStyle')
+        return
+    }
+    if (view.head && view.tail && view.head === view.tail) {
+        reportIgnoredWrite(report, 'lineStyle', requested, after,
+            'this edge has both ends on the same view, and EdgeView.arrangeObject forces a self-link back to ' +
+            LINE_STYLE_LABELS[0] + ' on every arrange')
+        return
+    }
+    if (writeValuesEqual(after, before)) {
+        reportIgnoredWrite(report, 'lineStyle', requested, after, 'the engine kept the previous value')
+        return
+    }
+    report.clamped.push({ field: 'lineStyle', requested: requested, actual: after })
+}
+
 function updateViewStyle(id, body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, STYLE_ALLOWED_FIELDS),
@@ -7376,19 +7637,34 @@ function updateViewStyle(id, body, reqInfo) {
         return validationError('At least one field must be provided. Allowed fields: ' + STYLE_ALLOWED_FIELDS.join(', '), reqInfo, body)
     }
 
+    if (body.lineStyle !== undefined && VALID_LINE_STYLES.indexOf(body.lineStyle) === -1) {
+        return validationError('Invalid lineStyle ' + body.lineStyle + '. Allowed values: ' + describeLineStyles(), reqInfo, body)
+    }
+
     const view = findById(id)
     if (!view) {
         return { success: false, error: 'View not found: ' + id, request: Object.assign({}, reqInfo, { body: body }) }
     }
 
+    // lineStyle is declared on EdgeView, not on View. Engine.setProperty would
+    // log its own error and write nothing, which reaches the caller as a bare
+    // "ignored" with no reason; say why instead.
+    if (body.lineStyle !== undefined && !isEdgeView(view)) {
+        return validationError('Field "lineStyle" is only supported for edge views. This view is a ' + view.constructor.name, reqInfo, body)
+    }
+
     const report = createWriteReport()
 
-    const colorAndLineProps = ['fillColor', 'lineColor', 'fontColor', 'showShadow', 'lineStyle']
+    const colorAndLineProps = ['fillColor', 'lineColor', 'fontColor', 'showShadow']
     colorAndLineProps.forEach(function (prop) {
         if (body[prop] !== undefined) {
             applyProperty(report, view, prop, body[prop])
         }
     })
+
+    if (body.lineStyle !== undefined) {
+        setEdgeLineStyle(report, view, body.lineStyle)
+    }
 
     // Font properties: set together via Font object if any font field is provided
     if (body.fontFace !== undefined || body.fontSize !== undefined || body.fontStyle !== undefined) {
@@ -8701,6 +8977,9 @@ function buildCapabilities() {
         allowedGeneratorTypes: VALID_GENERATOR_TYPES,
         allowedMessageTypes: VALID_MESSAGE_TYPES,
         allowedChildContainerFields: CHILD_CONTAINER_FIELDS,
+        // EdgeView's own line style constants. A caller reading this does not
+        // have to learn them from a rejection, and cannot guess a sixth.
+        allowedLineStyles: LINE_STYLE_LABELS,
         // Which body fields each general-purpose write accepts. Read from the
         // same constants the handlers validate against, so a caller can find out
         // what this build takes instead of discovering it from a rejection —
@@ -8709,6 +8988,9 @@ function buildCapabilities() {
             'PUT /api/elements/:id': GENERIC_ELEMENT_UPDATE_FIELDS,
             'POST /api/elements/:id/children': GENERIC_CHILD_CREATE_FIELDS,
             'PUT /api/views/:id': VIEW_UPDATE_FIELDS,
+            'PUT /api/views/:id/style': STYLE_ALLOWED_FIELDS,
+            'PUT /api/views/:id/points': VIEW_POINTS_FIELDS,
+            'POST /api/views/:id/route': EDGE_ROUTE_FIELDS,
             'POST /api/seq/interactions/:id/messages': MESSAGE_ALLOWED_FIELDS,
             'PUT /api/seq/messages/:id': MESSAGE_UPDATE_FIELDS,
             // Relation ends take these inside end1/end2. `reference` moves the
@@ -8798,6 +9080,8 @@ function buildCapabilities() {
             'GET  /api/diagrams/:id/views',
             'PUT  /api/views/:id',
             'PUT  /api/views/:id/style',
+            'PUT  /api/views/:id/points',
+            'POST /api/views/:id/route',
             'PUT  /api/views/:id/reconnect',
             'GET  /api/views/:id/subviews',
             'GET  /api/elements/:id/children',
@@ -9558,6 +9842,18 @@ function route(method, url, body) {
     match = path.match(/^\/api\/views\/([^/]+)\/style$/)
     if (match && method === 'PUT') {
         return updateViewStyle(decodePathParam(match[1]), body, reqInfo)
+    }
+
+    // /api/views/:id/points
+    match = path.match(/^\/api\/views\/([^/]+)\/points$/)
+    if (match && method === 'PUT') {
+        return updateViewPoints(decodePathParam(match[1]), body, reqInfo)
+    }
+
+    // /api/views/:id/route
+    match = path.match(/^\/api\/views\/([^/]+)\/route$/)
+    if (match && method === 'POST') {
+        return routeViewEdge(decodePathParam(match[1]), body, reqInfo)
     }
 
     // /api/views/:id/subviews

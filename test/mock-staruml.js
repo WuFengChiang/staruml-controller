@@ -178,15 +178,34 @@ class Point {
         this.x = x
         this.y = y
     }
+    copy() { return new Point(this.x, this.y) }
 }
+// The internal array is named `points` because that is the field
+// Engine.modifyEdge reads off the Points object handed to it
+// (`edge.points.assign(points)` walks `pts.points`). A mock that hid it under
+// another name would accept a route the real engine cannot read.
 class Points {
     constructor(pts) {
-        this._pts = pts || []
+        this.points = pts || []
     }
-    count() { return this._pts.length }
-    getPoint(i) { return this._pts[i] }
-    clear() { this._pts = [] }
-    add(p) { this._pts.push(p) }
+    count() { return this.points.length }
+    getPoint(i) { return this.points[i] }
+    clear() { this.points = [] }
+    add(p) { this.points.push(p) }
+    insert(i, p) { this.points.splice(i, 0, p) }
+    remove(i) { this.points.splice(i, 1) }
+    setPoint(i, p) { this.points[i] = p }
+    copy() {
+        const out = new Points()
+        out.assign(this)
+        return out
+    }
+    assign(pts) {
+        this.points.length = 0
+        for (let i = 0; i < pts.points.length; i++) {
+            this.points.push(pts.points[i].copy())
+        }
+    }
 }
 class UMLSeqMessageView extends Element {
     constructor() {
@@ -250,6 +269,10 @@ class EdgeView extends View {
         this.points = new Points()
         this.tail = null
         this.head = null
+        // EdgeView's constructor reads app.preferences with LS_OBLIQUE as the
+        // fallback. Oblique is what an edge starts as unless a user has changed
+        // the preference.
+        this.lineStyle = 1
     }
 }
 class UMLAssociationView extends EdgeView {}
@@ -380,7 +403,7 @@ const type = {
     UMLRelationship, UMLDirectedRelationship, UMLDependency, UMLAbstraction,
     UMLRealization, UMLInterfaceRealization, UMLComponentRealization,
     UMLGeneralization, Hyperlink, Tag, UMLConstraint, UMLSequenceDiagram, UMLClassDiagram,
-    Point, UMLSeqMessageView,
+    Point, Points, UMLSeqMessageView,
     UMLUndirectedRelationship, UMLAssociation, UMLAssociationEnd,
     SysMLProperty, SysMLFlowProperty,
     View, NodeView, EdgeView, UMLAssociationView,
@@ -445,8 +468,44 @@ const redoStack = []
  * Stand-in for Diagram.drawDiagram: arrange every parasitic view on the
  * diagram, the way a repaint does in StarUML.
  */
+/**
+ * The part of EdgeView.arrangeObject that changes what a caller reads back.
+ *
+ * The real one recomputes every point from the line style. Reproduced here:
+ * the self-link rule, which overwrites lineStyle on every arrange, and
+ * reducePoints, which drops middle points that fall inside an end box. Both are
+ * cases where a write reports one value and the next draw stores another, and
+ * both are what the controller has to report honestly.
+ *
+ * Not reproduced: the junction arithmetic that snaps the two end points to the
+ * box borders. Offline tests must not assert on end coordinates.
+ */
+function arrangeEdge(edge) {
+    if (!(edge instanceof EdgeView)) return
+    if (edge.head && edge.tail && edge.head === edge.tail) {
+        edge.lineStyle = 0
+    }
+    const inBox = function (p, node) {
+        if (!node || !(node instanceof NodeView)) return false
+        return p.x >= node.left && p.x <= node.getRight() &&
+            p.y >= node.top && p.y <= node.getBottom()
+    }
+    let i = 1
+    while (i < edge.points.count() - 1) {
+        const p = edge.points.getPoint(i)
+        if (inBox(p, edge.tail) || inBox(p, edge.head)) {
+            edge.points.remove(i)
+        } else {
+            i++
+        }
+    }
+}
+
 function repaintDiagram(diagram) {
     if (!diagram || !Array.isArray(diagram.ownedViews)) return
+    diagram.ownedViews.forEach(function (v) {
+        if (v instanceof EdgeView) arrangeEdge(v)
+    })
     // Measure before arranging, in that order: LabelView.arrange sizes itself
     // from its text and only then computes left/top from the polar pair. Arrange
     // divides the width by two, so an unmeasured label would otherwise produce
@@ -541,6 +600,29 @@ const app = {
             view.distance = distance
             if (editor && typeof editor.repaint === 'function') editor.repaint()
             undoStack.push({ ops: [] })
+        },
+        // Mirrors Engine.setLineStyle: edge views only, arrange after the write
+        // so the points follow the new style, then repaint. The arrange is what
+        // forces a self-link back to LS_RECTILINEAR, so the controller's report
+        // of that case is exercised offline.
+        setLineStyle: function (editor, views, lineStyle) {
+            views.forEach(function (v) {
+                if (!(v instanceof EdgeView)) return
+                v.lineStyle = lineStyle
+                arrangeEdge(v)
+            })
+            if (editor && typeof editor.repaint === 'function') editor.repaint()
+            undoStack.push({ ops: [] })
+            redoStack.length = 0
+        },
+        // Mirrors Engine.modifyEdge: assign the points, repaint, record one
+        // undoable operation covering the edge and its sub views.
+        modifyEdge: function (editor, edge, points) {
+            if (!edge || !edge.points) return
+            edge.points.assign(points)
+            if (editor && typeof editor.repaint === 'function') editor.repaint()
+            undoStack.push({ ops: [] })
+            redoStack.length = 0
         },
         // Enough to show that the controller reaches the engine for diagram
         // types it allows. It does not lay anything out — the real one runs

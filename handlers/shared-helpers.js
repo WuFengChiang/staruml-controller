@@ -121,6 +121,35 @@ function serializeGenericDiagramDetail(diagram) {
     }
 }
 
+/**
+ * A StarUML Points collection as a plain array of {x, y}.
+ *
+ * Points exposes count()/getPoint(), and its internal array is `points`. Both
+ * are read here because the offline mock builds one and the engine builds the
+ * other. Returns null for anything that is not a points collection, so callers
+ * can tell "no route" from "an empty route".
+ */
+function pointsToArray(points) {
+    if (!points) {
+        return null
+    }
+    let raw = null
+    if (typeof points.count === 'function' && typeof points.getPoint === 'function') {
+        raw = []
+        for (let i = 0, n = points.count(); i < n; i++) {
+            raw.push(points.getPoint(i))
+        }
+    } else if (Array.isArray(points.points)) {
+        raw = points.points
+    }
+    if (!raw) {
+        return null
+    }
+    return raw.map(function (p) {
+        return { x: p.x, y: p.y }
+    })
+}
+
 function serializeViewInfo(view) {
     if (!view) {
         return null
@@ -131,6 +160,18 @@ function serializeViewInfo(view) {
     }
     if (view.model) {
         result.modelId = view.model._id
+    }
+    // An edge is drawn from its points, not from left/top, and its line style
+    // decides how those points are recomputed on the next arrange. A caller that
+    // cannot read either one cannot tell what a write to them actually did.
+    if (view.lineStyle !== undefined) {
+        result.lineStyle = view.lineStyle
+    }
+    if (view.points) {
+        const pts = pointsToArray(view.points)
+        if (pts) {
+            result.points = pts
+        }
     }
     if (view.left !== undefined) {
         result.left = view.left
@@ -705,6 +746,7 @@ module.exports = {
     serializeGenericDiagram: serializeGenericDiagram,
     serializeGenericDiagramDetail: serializeGenericDiagramDetail,
     serializeViewInfo: serializeViewInfo,
+    pointsToArray: pointsToArray,
     // Write reporting
     createWriteReport: createWriteReport,
     applyProperty: applyProperty,

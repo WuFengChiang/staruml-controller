@@ -45,6 +45,7 @@ Designed for integration with AI tools such as Claude Code (via MCP) to programm
 - **Shapes** - create and manage view-only elements (Text, TextBox, Rect, RoundRect, Ellipse, Hyperlink, Image, UMLFrame)
 - **Notes, note links, and free lines** - annotate any diagram
 - **View manipulation** - move/resize views, update styles (fillColor, lineColor, fontColor, fontSize, autoResize, stereotypeDisplay, etc.), reconnect edges, align/distribute views
+- **Edge shape** - set a line style, place waypoints by hand, or have a route worked out that avoids the other boxes
 - **Child elements** - create attributes, operations, enumeration literals, pins, etc. under parent elements
 - **Diagram export** - export diagrams to PNG, JPEG, SVG, or PDF; bulk export all diagrams; export project as HTML/Markdown
 - **Auto layout** - automatic diagram layout with configurable direction and spacing
@@ -384,6 +385,147 @@ second drag would.
 If the label's diagram is not the one open in the editor, the draw happens on
 StarUML's hidden editor, so nothing the user is looking at changes.
 
+## Line Style and Edge Waypoints
+
+A line on a diagram has two separable properties: the *style* that decides how
+the engine bends it, and the *waypoints* that decide where it goes.
+
+### Line style
+
+`PUT /api/views/:id/style` takes `lineStyle` on an edge view. The five values
+are `EdgeView`'s own constants:
+
+| Value | Constant | Format menu |
+|---|---|---|
+| 0 | `LS_RECTILINEAR` | Rectilinear |
+| 1 | `LS_OBLIQUE` | Oblique — what a new edge starts as |
+| 2 | `LS_ROUNDRECT` | Rounded Rectilinear |
+| 3 | `LS_CURVE` | Curve |
+| 4 | `LS_DIRECT` | *no menu command* |
+
+```bash
+curl -X PUT "http://localhost:12345/api/views/$EDGE_VIEW_ID/style" \
+  -H 'Content-Type: application/json' \
+  -d '{"lineStyle":0}'
+```
+
+Anything outside 0–4 is refused with the list above rather than stored.
+`lineStyle` is a saved integer on `EdgeView` with a default of 0, so a value the
+engine cannot draw would otherwise reach the `.mdj`. Value 4 is accepted because
+the engine draws it, but StarUML's own Format menu offers no way back from it —
+set an edge to 4 only if the API is going to set it back.
+
+The write goes through `Engine.setLineStyle`, which is what the Style editor
+uses: it arranges the edge so its points follow the new style, repaints, and
+records the labels the re-arrange moved in the same undoable operation. The
+arrange happens on the hidden editor when the edge's diagram is not the one on
+screen, so a line style can be set on a diagram nobody has open.
+
+`lineStyle` is declared on `EdgeView`, not on `View`. Sending it for a node view
+is refused by name rather than written and quietly dropped.
+
+**A self-link is a permanent exception.** `EdgeView.arrangeObject` forces an edge
+with both ends on the same view back to `LS_RECTILINEAR` on *every* arrange.
+Asking for any other style on one reports the field in `ignored`, with that as
+the reason. The value is not stored, because the arrange that follows the write
+has already overwritten it.
+
+### Waypoints
+
+`GET /api/diagrams/:id/views` reports `lineStyle` and `points` for every edge, so
+a caller can read a route back rather than guess at it.
+
+`PUT /api/views/:id/points` replaces the route. It takes the whole thing, ends
+included, and at least two points:
+
+```bash
+curl -X PUT "http://localhost:12345/api/views/$EDGE_VIEW_ID/points" \
+  -H 'Content-Type: application/json' \
+  -d '{"points":[{"x":115,"y":340},{"x":115,"y":520},{"x":715,"y":520},{"x":715,"y":340}]}'
+```
+
+Two things the engine does to a route are normal rather than failures, and the
+response reports them in different places on purpose:
+
+- **The two ends belong to the engine.** Every arrange snaps point 0 and the
+  last point to where the line meets the tail and head boxes. Send the box
+  centres and let it place them. This happens on nearly every write, so it is
+  reported as `data.endsSnappedByEngine` rather than in the message, where it
+  would become noise that hides the next one.
+- **A waypoint inside an end box disappears.** `EdgeView.reducePoints` deletes
+  any middle point that falls inside the tail or the head box. This one *is* in
+  the message, naming how many points were asked for and how many were stored.
+
+Middle points outside those boxes survive, under every line style. That is what
+makes a hand-placed route stick, and it is the property routing below relies on.
+
+### Moving a box no longer has to destroy the route
+
+`PUT /api/views/:id` clears the waypoints of every edge on a node it moves or
+resizes — the route is re-drawn as a straight line between the two centres. That
+has always been this endpoint's behaviour and it is still the default, because a
+route drawn for one arrangement is usually wrong for the next.
+
+Pass `keepEdgeWaypoints: true` alongside the move to keep them:
+
+```bash
+curl -X PUT "http://localhost:12345/api/views/$CLASS_VIEW_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"top":300,"keepEdgeWaypoints":true}'
+```
+
+The ends still follow the box, because the engine owns them. On its own — with
+no `left`, `top`, `width` or `height` — the flag is refused, since there would be
+no move for it to qualify.
+
+`PUT /api/views/:id/reconnect` always clears the route, with no opt-out. The
+edge has new endpoints, so the old shape describes a line that no longer exists.
+
+### Routing around the other boxes
+
+`POST /api/views/:id/route` works out a right-angle route from tail to head that
+misses every other box on the diagram, and writes it.
+
+```bash
+curl -X POST "http://localhost:12345/api/views/$EDGE_VIEW_ID/route" \
+  -H 'Content-Type: application/json' \
+  -d '{"margin":10,"grid":10}'
+```
+
+`margin` is how far the route keeps clear of a box it goes around (default 10).
+`grid` is the step it plans on (default 10). A coarser grid searches a large
+diagram faster and threads narrow gaps worse.
+
+The response carries both routes: `data.points` is what the engine stored, and
+`data.requestedPoints` is what the router worked out before the engine snapped
+the two ends. They differ only at the ends. `data.obstacleCount` says how many
+boxes the route had to consider.
+
+**The path finding is this controller's own, not StarUML's.** The engine has
+none: `recalcOblique` and `recalcRectilinear` look at `this.tail` and
+`this.head` and at nothing else on the diagram, which is why a plain edge runs
+straight through whatever is in the way. So the limits here are the
+implementation's, and they are worth knowing:
+
+- **Obstacles are node views only.** Other edges are not avoided — a route may
+  cross another line. Treating lines as obstacles makes most diagrams
+  unroutable.
+- **Four things are never obstacles**: the edge's own two ends; any view that
+  contains either end (a line leaving a box inside a package has to cross that
+  package); edge labels and other parasitic views; and hidden views.
+- **The line style is left alone.** Both recalc paths keep middle points, so the
+  right-angle route draws correctly whatever the style is. Switching to
+  `lineStyle: 0` afterwards is safe too: `convObliqueToRectilinear` only runs on
+  a path that is not already at right angles, and this one is.
+- **Failure is reported, not papered over.** If no route avoids everything, the
+  response is `success: false` with the reason. It never falls back to the
+  straight line and calls that success.
+- **A self-link has no route to find**; the engine draws its shape itself, so
+  routing one is refused.
+
+A route written either way is a normal undoable operation: `POST /api/undo`
+puts the previous shape back.
+
 ## Constraints
 
 A `UMLConstraint` shows its `specification` on the canvas, not its name — a
@@ -593,8 +735,10 @@ something is waiting for a button.
 | `/api/shapes/:id` | GET / PUT / DELETE | Get, update, or delete shape |
 | `/api/diagrams/:id/views` | GET | List all views on diagram (top level only — use `/subviews` for nested) |
 | `/api/views/:id/subviews` | GET | List views nested inside a view (edge labels, state regions). `?recursive=true`, `?type=EdgeLabelView` |
-| `/api/views/:id` | PUT | Move/resize view (`left`, `top`, `width`, `height`). An edge label takes the same `left`/`top`, converted to the `alpha`/`distance`/`edgePosition` StarUML stores |
-| `/api/views/:id/style` | PUT | Update view style (fillColor, lineColor, autoResize, suppressAttributes, suppressOperations, etc.) |
+| `/api/views/:id` | PUT | Move/resize view (`left`, `top`, `width`, `height`). An edge label takes the same `left`/`top`, converted to the `alpha`/`distance`/`edgePosition` StarUML stores. `keepEdgeWaypoints` stops the move from clearing the routes of the edges on it — see *Line Style and Edge Waypoints* |
+| `/api/views/:id/style` | PUT | Update view style (fillColor, lineColor, autoResize, suppressAttributes, suppressOperations, etc.), and `lineStyle` on an edge — see *Line Style and Edge Waypoints* |
+| `/api/views/:id/points` | PUT | Replace an edge's route. Takes the whole path as `points: [{x, y}, ...]`, ends included |
+| `/api/views/:id/route` | POST | Work out a right-angle route that avoids the other boxes, and write it. Optional `margin`, `grid` |
 | `/api/views/:id/reconnect` | PUT | Reconnect edge to different source/target |
 | `/api/views/align` | POST | Align/distribute views |
 | `/api/project/save` | POST | Save project. This is "save as": it repoints the open project at `path`, so every later save writes there too |

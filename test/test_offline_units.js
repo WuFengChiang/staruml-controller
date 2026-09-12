@@ -920,5 +920,152 @@ r = api.route('POST', '/api/diagrams/' + gapClassDiagram._id + '/layout', {})
 check('a class diagram still lays out',
     r.success === true, r)
 
+console.log('\n=== D-1: line style is settable, readable, and honest about the self-link ===')
+
+const styleDiagram = mock.register(new t.UMLClassDiagram(), 'Routing', collab)
+const boxA = nodeViewFor(mock.register(new t.UMLClass(), 'A'), styleDiagram, 0, 0)
+const boxB = nodeViewFor(mock.register(new t.UMLClass(), 'B'), styleDiagram, 400, 0)
+// Squarely between A and B, so a straight line from A to B runs through it.
+const blocker = nodeViewFor(mock.register(new t.UMLClass(), 'Blocker'), styleDiagram, 180, 0)
+mock.app.diagrams._current = styleDiagram
+
+function edgeOn(diagram, tail, head) {
+    const v = new t.UMLAssociationView()
+    v.tail = tail
+    v.head = head
+    v._parent = diagram
+    v.points.add(new mock.Point(tail.left + tail.width / 2, tail.top + tail.height / 2))
+    v.points.add(new mock.Point(head.left + head.width / 2, head.top + head.height / 2))
+    diagram.ownedViews.push(v)
+    mock.store.push(v)
+    return v
+}
+const styleEdge = edgeOn(styleDiagram, boxA, boxB)
+
+r = api.route('GET', '/api/diagrams/' + styleDiagram._id + '/views')
+const edgeInList = r.data.filter(function (d) { return d._id === styleEdge._id })[0]
+check('an edge reports its line style, so a caller can read back what it set',
+    edgeInList && edgeInList.lineStyle === 1, edgeInList)
+check('and reports its points, so a caller can read the route',
+    edgeInList && Array.isArray(edgeInList.points) && edgeInList.points.length === 2, edgeInList)
+
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/style', { lineStyle: 0 })
+check('lineStyle 0 (rectilinear) is accepted',
+    r.success === true && styleEdge.lineStyle === 0, r)
+check('and the response carries the stored value',
+    r.data && r.data.lineStyle === 0, r.data)
+
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/style', { lineStyle: 7 })
+check('a value outside the engine\'s five is refused, not stored',
+    r.success === false && /Allowed values/.test(r.error || ''), r)
+check('and the refusal names them',
+    /LS_RECTILINEAR/.test(r.error || '') && /LS_DIRECT/.test(r.error || ''), r.error)
+check('the edge kept the last good value',
+    styleEdge.lineStyle === 0, styleEdge.lineStyle)
+
+r = api.route('PUT', '/api/views/' + boxA._id + '/style', { lineStyle: 1 })
+check('lineStyle on a node view is refused with the view type',
+    r.success === false && /only supported for edge views/.test(r.error || ''), r)
+
+const selfEdge = edgeOn(styleDiagram, boxA, boxA)
+r = api.route('PUT', '/api/views/' + selfEdge._id + '/style', { lineStyle: 1 })
+check('a self-link reports the oblique write as ignored, not as updated',
+    r.success === true && Array.isArray(r.ignored) &&
+    r.ignored.some(function (i) { return i.field === 'lineStyle' }), r)
+check('and says the arrange pass is what overwrites it',
+    r.ignored.some(function (i) { return /arrangeObject/.test(i.reason || '') }), r.ignored)
+check('the stored value is the rectilinear the engine forced',
+    selfEdge.lineStyle === 0, selfEdge.lineStyle)
+
+console.log('\n=== D-2: an edge route can be written and read back ===')
+
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/points', {
+    points: [{ x: 50, y: 20 }, { x: 50, y: 200 }, { x: 450, y: 200 }, { x: 450, y: 20 }]
+})
+check('a four-point route is accepted',
+    r.success === true, r)
+check('and reads back with its two waypoints',
+    r.data && r.data.points && r.data.points.length === 4, r.data && r.data.points)
+
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/points', { points: [{ x: 0, y: 0 }] })
+check('a one-point route is refused',
+    r.success === false && /at least two points/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/points', { points: [{ x: 0, y: 0 }, { x: 'a', y: 1 }] })
+check('a non-numeric coordinate is refused and names the index',
+    r.success === false && /points\[1\]/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/views/' + boxA._id + '/points', { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] })
+check('points on a node view are refused',
+    r.success === false && /only supported for edge views/.test(r.error || ''), r)
+
+// A waypoint inside an end box is dropped by the engine's own reducePoints.
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/points', {
+    points: [{ x: 50, y: 20 }, { x: 20, y: 20 }, { x: 450, y: 20 }]
+})
+check('a waypoint inside the tail box is dropped, and the response says so',
+    r.success === true && /drops waypoints/.test(r.message || ''), r.message)
+
+console.log('\n=== D-3: moving a box keeps or clears the route, as asked ===')
+
+api.route('PUT', '/api/views/' + styleEdge._id + '/points', {
+    points: [{ x: 50, y: 20 }, { x: 50, y: 200 }, { x: 450, y: 200 }, { x: 450, y: 20 }]
+})
+r = api.route('PUT', '/api/views/' + boxA._id, { top: 10 })
+check('moving a box clears the route, the way it always has',
+    r.success === true && styleEdge.points.count() === 2, styleEdge.points.count())
+
+api.route('PUT', '/api/views/' + styleEdge._id + '/points', {
+    points: [{ x: 50, y: 30 }, { x: 50, y: 200 }, { x: 450, y: 200 }, { x: 450, y: 20 }]
+})
+r = api.route('PUT', '/api/views/' + boxA._id, { top: 20, keepEdgeWaypoints: true })
+check('keepEdgeWaypoints leaves the waypoints alone',
+    r.success === true && styleEdge.points.count() === 4, styleEdge.points.count())
+
+r = api.route('PUT', '/api/views/' + boxA._id, { keepEdgeWaypoints: true })
+check('keepEdgeWaypoints on its own is refused, rather than reporting a write it did not do',
+    r.success === false && /alongside a move or resize/.test(r.error || ''), r)
+
+console.log('\n=== D-4: routing goes around a box in the way ===')
+
+r = api.route('POST', '/api/views/' + styleEdge._id + '/route', {})
+check('routing succeeds and says how many views it had to avoid',
+    r.success === true && /Routed edge around 1 view/.test(r.message || ''), r)
+const routed = r.data && r.data.points
+check('the route has at least one waypoint, so it is not the straight line',
+    routed && routed.length > 2, routed)
+check('and no waypoint sits inside the blocking box',
+    routed && routed.every(function (p) {
+        return !(p.x >= blocker.left && p.x <= blocker.getRight() &&
+            p.y >= blocker.top && p.y <= blocker.getBottom())
+    }), { routed: routed, blocker: { left: blocker.left, top: blocker.top, w: blocker.width, h: blocker.height } })
+
+r = api.route('POST', '/api/views/' + selfEdge._id + '/route', {})
+check('a self-link is refused with the reason, not routed into nonsense',
+    r.success === false && /same view/.test(r.error || ''), r)
+
+r = api.route('POST', '/api/views/' + styleEdge._id + '/route', { grid: 0 })
+check('a zero grid is refused',
+    r.success === false && /positive number/.test(r.error || ''), r)
+
+r = api.route('POST', '/api/views/' + boxA._id + '/route', {})
+check('routing a node view is refused',
+    r.success === false && /only supported for edge views/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/views/' + styleEdge._id + '/points', {
+    points: [{ x: 50, y: 30 }, { x: 50, y: 200 }, { x: 450, y: 20 }]
+})
+check('the response always states whether the engine moved the two ends',
+    r.success === true && r.data && typeof r.data.endsSnappedByEngine === 'boolean', r.data)
+
+// Bury the tail box inside a bigger one: there is no way out, and that is a
+// different problem from "no route exists".
+const cage = nodeViewFor(mock.register(new t.UMLClass(), 'Cage'), styleDiagram, -60, -60)
+cage.width = 300
+cage.height = 200
+r = api.route('POST', '/api/views/' + styleEdge._id + '/route', {})
+check('a tail buried inside another box is reported as no way out, not as no route',
+    r.success === false && /no way out/.test(r.error || ''), r.error)
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)
