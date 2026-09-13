@@ -615,9 +615,55 @@ nothing in the model. Two defaults were wrong that way (`UMLConstraint` and
 `UMLPort`), and one listed child type, `SysMLOperation`, is not a class in the
 metamodel at all and has been removed.
 
-`GET /api/status/capabilities` publishes `writableFields`, read from the same
-constants the handlers validate against, so what a build accepts can be looked up
-instead of discovered from a rejection.
+## Which Fields a Build Accepts
+
+`GET /api/status/capabilities` publishes `writableFields`: every endpoint that
+takes a body, keyed by `"METHOD /path"`, with the fields it accepts.
+
+```json
+"writableFields": {
+  "PUT /api/elements/:id": ["name", "stereotype", "documentation", "referenceId",
+                            "typeId", "typeName", "type", "direction", ...],
+  "POST /api/seq/interactions/:id/lifelines": ["name", "stereotype", "documentation",
+                            "diagramId", "x", "y", "height", "representTypeId", ...],
+  "PUT /api/class/classes/:id": ["name", "documentation", "isAbstract", ...]
+}
+```
+
+The values are the arrays the handlers check against, not copies of them. The
+family half — everything under `/api/class/`, `/api/seq/` and the other family
+prefixes — is derived from the route table the router dispatches on, so a
+resource added to a family config appears here with nothing else to update.
+
+**This is the endpoint that answers "does any route accept field X".** Reading
+an MCP tool's schema answers something narrower: whether that tool declares X. A
+tool schema can omit a field the controller takes, and then the field cannot be
+sent from an MCP client at all, because the client rejects undeclared arguments
+before the request is made. That failure looks identical, from the client, to
+the controller not supporting the field — which is how it has produced wrong
+conclusions that then got written down and quoted.
+
+Two checks keep the listing honest, both in `test/test_offline_units.js`:
+
+- Every published path is probed with an unknown field. The rejection has to
+  name exactly the fields the listing published. This proves the path exists,
+  the method is right, and the value is the array that endpoint really enforces.
+- Every `checkUnknownFields` constant in `api-handler.js` has to appear under
+  some endpoint, so adding a whitelist without publishing it fails the suite.
+
+The probe is read-only, and worth knowing as a technique on its own: field
+checking runs before the lookup, so an unknown field sent to a made-up id comes
+back as `Unknown field(s)` rather than `not found`, without touching anything.
+
+```bash
+curl -s -X PUT "http://localhost:12345/api/elements/probe-not-a-real-id" \
+  -H 'Content-Type: application/json' -d '{"__probe__":1}'
+# Unknown field(s): __probe__. Allowed fields: name, stereotype, documentation, ...
+```
+
+On the MCP side, `staruml-controller-mcp-core` has `npm run check-drift`, which
+reads this endpoint and compares it against every tool's declared parameters,
+reporting fields the controller takes that no tool declares.
 
 ## Undo and Redo
 

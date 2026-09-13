@@ -351,6 +351,7 @@ const STYLE_ALLOWED_FIELDS = [
 ]
 
 const GENERIC_DIAGRAM_CREATE_FIELDS = ['type', 'name', 'parentId']
+const GENERIC_DIAGRAM_UPDATE_FIELDS = ['name']
 const GENERIC_ELEMENT_CREATE_FIELDS = ['type', 'name', 'x1', 'y1', 'x2', 'y2', 'pseudostateKind', 'attachToViewId']
 const GENERIC_RELATION_CREATE_FIELDS = ['type', 'sourceId', 'targetId', 'name']
 // Types whose factory functions expect the diagram itself as parent (not diagram._parent).
@@ -6773,7 +6774,7 @@ function getGenericDiagram(id, reqInfo) {
 
 function updateGenericDiagram(id, body, reqInfo) {
     const err = validate([
-        checkUnknownFields(body, ['name']),
+        checkUnknownFields(body, GENERIC_DIAGRAM_UPDATE_FIELDS),
         checkFieldType(body, 'name', 'string')
     ])
     if (err) {
@@ -6781,7 +6782,7 @@ function updateGenericDiagram(id, body, reqInfo) {
     }
 
     if (Object.keys(body).length === 0) {
-        return validationError('At least one field must be provided. Allowed fields: name', reqInfo, body)
+        return validationError('At least one field must be provided. Allowed fields: ' + GENERIC_DIAGRAM_UPDATE_FIELDS.join(', '), reqInfo, body)
     }
 
     if (body.name !== undefined) {
@@ -8959,6 +8960,111 @@ function buildStatus() {
 }
 
 /**
+ * Every hand-written route that takes a body, with the constant it validates
+ * against. The family routes answer for themselves — see familyWritableFields.
+ *
+ * The values are the very arrays the handlers check, not copies, so a field
+ * added to one of those constants appears here with no second edit. What this
+ * table does carry by hand is the mapping from endpoint to constant.
+ *
+ * test_offline_units.js probes every key to prove that mapping: it sends an
+ * unknown field to each path and checks the rejection lists exactly these
+ * fields back. It probes the whole of writableFields, so the generated family
+ * routes are covered by the same check — which is what shows that the field
+ * sets they publish really are the ones their handlers enforce.
+ */
+const STATIC_WRITABLE_FIELDS = {
+    'POST /api/diagrams': GENERIC_DIAGRAM_CREATE_FIELDS,
+    'POST /api/diagrams/:id/create-view-of': CREATE_VIEW_OF_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/elements': GENERIC_ELEMENT_CREATE_FIELDS,
+    'POST /api/diagrams/:id/export': EXPORT_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/free-lines': FREE_LINE_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/layout': LAYOUT_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/link-object': LINK_OBJECT_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/note-links': NOTE_LINK_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/notes': NOTE_ALLOWED_FIELDS,
+    'POST /api/diagrams/:id/relations': GENERIC_RELATION_CREATE_FIELDS,
+    'POST /api/diagrams/:id/shapes': SHAPE_CREATE_FIELDS,
+    'POST /api/diagrams/generate': GENERATOR_ALLOWED_FIELDS,
+    'POST /api/elements/:id/children': GENERIC_CHILD_CREATE_FIELDS,
+    'POST /api/elements/:id/tags': TAG_ALLOWED_FIELDS,
+    'POST /api/erd/data-models': DATA_MODEL_ALLOWED_FIELDS,
+    'POST /api/erd/diagrams': DIAGRAM_ALLOWED_FIELDS,
+    'POST /api/erd/entities': ENTITY_ALLOWED_FIELDS,
+    'POST /api/erd/entities/:id/columns': COLUMN_ALLOWED_FIELDS,
+    'POST /api/erd/entities/:id/indexes': INDEX_ALLOWED_FIELDS,
+    'POST /api/erd/entities/:id/sequences': SEQUENCE_ALLOWED_FIELDS,
+    'POST /api/erd/postgresql/ddl': DDL_GENERATE_ALLOWED_FIELDS,
+    'POST /api/erd/relationships': RELATIONSHIP_ALLOWED_FIELDS,
+    'POST /api/mermaid/import': MERMAID_ALLOWED_FIELDS,
+    'POST /api/project/export': FRAGMENT_EXPORT_ALLOWED_FIELDS,
+    'POST /api/project/export-all': EXPORT_ALL_ALLOWED_FIELDS,
+    'POST /api/project/export-doc': DOC_EXPORT_ALLOWED_FIELDS,
+    'POST /api/project/import': IMPORT_ALLOWED_FIELDS,
+    'POST /api/project/open': PROJECT_OPEN_ALLOWED_FIELDS,
+    'POST /api/project/save': PROJECT_SAVE_ALLOWED_FIELDS,
+    'POST /api/project/snapshot': PROJECT_SNAPSHOT_ALLOWED_FIELDS,
+    'POST /api/seq/combined-fragments/:id/operands': OPERAND_ALLOWED_FIELDS,
+    'POST /api/seq/diagrams': SEQ_DIAGRAM_ALLOWED_FIELDS,
+    'POST /api/seq/interactions': INTERACTION_ALLOWED_FIELDS,
+    'POST /api/seq/interactions/:id/combined-fragments': COMBINED_FRAGMENT_ALLOWED_FIELDS,
+    'POST /api/seq/interactions/:id/interaction-uses': INTERACTION_USE_ALLOWED_FIELDS,
+    'POST /api/seq/interactions/:id/lifelines': LIFELINE_ALLOWED_FIELDS,
+    'POST /api/seq/interactions/:id/messages': MESSAGE_ALLOWED_FIELDS,
+    'POST /api/seq/interactions/:id/state-invariants': STATE_INVARIANT_ALLOWED_FIELDS,
+    'POST /api/views/:id/route': EDGE_ROUTE_FIELDS,
+    'POST /api/views/align': ALIGN_ALLOWED_FIELDS,
+    'PUT /api/diagrams/:id': GENERIC_DIAGRAM_UPDATE_FIELDS,
+    'PUT /api/diagrams/:id/zoom': ZOOM_ALLOWED_FIELDS,
+    'PUT /api/elements/:id': GENERIC_ELEMENT_UPDATE_FIELDS,
+    'PUT /api/elements/:id/relocate': RELOCATE_ALLOWED_FIELDS,
+    'PUT /api/elements/:id/reorder': REORDER_ALLOWED_FIELDS,
+    'PUT /api/erd/columns/:id': COLUMN_ALLOWED_FIELDS,
+    'PUT /api/erd/data-models/:id': DATA_MODEL_UPDATE_FIELDS,
+    'PUT /api/erd/diagrams/:id': DIAGRAM_UPDATE_FIELDS,
+    'PUT /api/erd/entities/:id': ENTITY_UPDATE_FIELDS,
+    'PUT /api/erd/indexes/:id': INDEX_ALLOWED_FIELDS,
+    'PUT /api/erd/relationships/:id': RELATIONSHIP_UPDATE_FIELDS,
+    'PUT /api/erd/sequences/:id': SEQUENCE_ALLOWED_FIELDS,
+    'PUT /api/notes/:id': NOTE_UPDATE_FIELDS,
+    'PUT /api/seq/combined-fragments/:id': COMBINED_FRAGMENT_UPDATE_FIELDS,
+    'PUT /api/seq/diagrams/:id': SEQ_DIAGRAM_UPDATE_FIELDS,
+    'PUT /api/seq/interaction-uses/:id': INTERACTION_USE_UPDATE_FIELDS,
+    'PUT /api/seq/interactions/:id': INTERACTION_UPDATE_FIELDS,
+    'PUT /api/seq/lifelines/:id': LIFELINE_UPDATE_FIELDS,
+    'PUT /api/seq/messages/:id': MESSAGE_UPDATE_FIELDS,
+    'PUT /api/seq/operands/:id': OPERAND_UPDATE_FIELDS,
+    'PUT /api/seq/state-invariants/:id': STATE_INVARIANT_UPDATE_FIELDS,
+    'PUT /api/shapes/:id': SHAPE_UPDATE_FIELDS,
+    'PUT /api/tags/:id': TAG_ALLOWED_FIELDS,
+    'PUT /api/views/:id': VIEW_UPDATE_FIELDS,
+    'PUT /api/views/:id/points': VIEW_POINTS_FIELDS,
+    'PUT /api/views/:id/reconnect': RECONNECT_ALLOWED_FIELDS,
+    'PUT /api/views/:id/style': STYLE_ALLOWED_FIELDS
+}
+
+/**
+ * Every generated family route that takes a body, with the fields it accepts.
+ *
+ * Read from the same route table the router dispatches on, so a resource added
+ * to a family config shows up here with no second list to update. That is the
+ * point: a caller which reads a field list from anywhere other than the code
+ * enforcing it can only prove that the list it read lacks a field, never that
+ * no route accepts it.
+ */
+function familyWritableFields() {
+    const out = {}
+    familyConfigs.forEach(function (config) {
+        crudFactory.createFamilyHandlers(config).forEach(function (r) {
+            if (r.allowedFields) {
+                out[r.method + ' ' + r.pattern] = r.allowedFields
+            }
+        })
+    })
+    return out
+}
+
+/**
  * Full type and endpoint listing for GET /api/status/capabilities.
  */
 function buildCapabilities() {
@@ -8980,24 +9086,29 @@ function buildCapabilities() {
         // EdgeView's own line style constants. A caller reading this does not
         // have to learn them from a rejection, and cannot guess a sixth.
         allowedLineStyles: LINE_STYLE_LABELS,
-        // Which body fields each general-purpose write accepts. Read from the
-        // same constants the handlers validate against, so a caller can find out
-        // what this build takes instead of discovering it from a rejection —
-        // and so this listing cannot drift away from the code.
-        writableFields: {
-            'PUT /api/elements/:id': GENERIC_ELEMENT_UPDATE_FIELDS,
-            'POST /api/elements/:id/children': GENERIC_CHILD_CREATE_FIELDS,
-            'PUT /api/views/:id': VIEW_UPDATE_FIELDS,
-            'PUT /api/views/:id/style': STYLE_ALLOWED_FIELDS,
-            'PUT /api/views/:id/points': VIEW_POINTS_FIELDS,
-            'POST /api/views/:id/route': EDGE_ROUTE_FIELDS,
-            'POST /api/seq/interactions/:id/messages': MESSAGE_ALLOWED_FIELDS,
-            'PUT /api/seq/messages/:id': MESSAGE_UPDATE_FIELDS,
-            // Relation ends take these inside end1/end2. `reference` moves the
-            // end to a different element and re-points every view of the
-            // relation; `referenceId` is the same field under the other name.
-            'relation end (end1/end2)': ['name', 'navigable', 'aggregation', 'multiplicity', 'reference', 'referenceId']
-        },
+        // Which body fields every write accepts, keyed by "METHOD /path".
+        //
+        // Read from the same constants the handlers validate against, so a
+        // caller finds out what this build takes instead of discovering it from
+        // a rejection — and so this listing cannot drift away from the code.
+        // The family half is derived from the route table itself, so a resource
+        // added to a family config appears here without anyone editing this.
+        //
+        // This is the answer to "does any route accept field X". Reading an MCP
+        // tool's schema answers a narrower question: whether that tool declares
+        // X. The two are not the same, and treating them as the same has
+        // produced false conclusions before.
+        writableFields: Object.assign(
+            familyWritableFields(),
+            STATIC_WRITABLE_FIELDS,
+            {
+                // Relation ends take these inside end1/end2, so they belong to
+                // no single path. `reference` moves the end to a different
+                // element and re-points every view of the relation;
+                // `referenceId` is the same field under the other name.
+                'relation end (end1/end2)': ['name', 'navigable', 'aggregation', 'multiplicity', 'reference', 'referenceId']
+            }
+        ),
         endpoints: [
             'GET  /api/status',
             'GET  /api/status/capabilities',

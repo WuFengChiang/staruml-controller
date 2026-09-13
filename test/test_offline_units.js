@@ -1067,5 +1067,76 @@ r = api.route('POST', '/api/views/' + styleEdge._id + '/route', {})
 check('a tail buried inside another box is reported as no way out, not as no route',
     r.success === false && /no way out/.test(r.error || ''), r.error)
 
+console.log('\n=== E-1: capabilities reports the field list every write actually enforces ===')
+
+// The whole point of publishing writableFields is that a caller can ask "does
+// any route take field X" without sending a request and reading the rejection.
+// That only holds if every key names a real endpoint and every value is the
+// array that endpoint checks against.
+//
+// Probing proves both at once, and it is read-only: checkUnknownFields runs
+// before findById, so an unknown field on a made-up id is refused before the
+// handler looks anything up.
+const caps = api.route('GET', '/api/status/capabilities')
+const writable = caps.data.writableFields
+const capKeys = Object.keys(writable).filter(function (k) { return /^[A-Z]+ \//.test(k) })
+
+check('capabilities publishes a field list for every write, not a handful',
+    capKeys.length > 300, capKeys.length)
+
+const probeFailures = []
+const notProbed = []
+capKeys.forEach(function (key) {
+    const sp = key.indexOf(' ')
+    const method = key.slice(0, sp)
+    const path = key.slice(sp + 1).replace(/:[a-zA-Z]+/g, 'probe-not-a-real-id')
+    let r
+    try {
+        r = api.route(method, path, { __probe__: 1 })
+    } catch (e) {
+        probeFailures.push({ key: key, threw: e.message })
+        return
+    }
+    const err = (r && r.error) || ''
+    const m = err.match(/Allowed fields: (.*)$/)
+    if (!m) {
+        notProbed.push({ key: key, error: err.slice(0, 90) || '(no error — the probe was accepted)' })
+        return
+    }
+    const reported = m[1].split(', ')
+    const expected = writable[key]
+    if (reported.join('|') !== expected.join('|')) {
+        probeFailures.push({ key: key, reported: reported, published: expected })
+    }
+})
+
+check('every published path exists and refuses an unknown field before looking anything up',
+    notProbed.length === 0, notProbed.slice(0, 6))
+check('and the list it refuses with is exactly the list capabilities published',
+    probeFailures.length === 0, probeFailures.slice(0, 6))
+console.log('     probed ' + capKeys.length + ' endpoints, ' +
+    (capKeys.length - probeFailures.length - notProbed.length) + ' matched')
+
+// A constant nobody registered is the drift this endpoint exists to prevent, so
+// fail on it here rather than letting it be found by a caller months later.
+const apiSrc = require('fs').readFileSync(
+    process.env.API_PATH ? process.env.API_PATH + '.js' : path.join(__dirname, '..', 'api-handler.js'), 'utf8')
+const usedConstants = []
+const re = /checkUnknownFields\(body,\s*([A-Z][A-Z0-9_]*)\s*\)/g
+let cm
+while ((cm = re.exec(apiSrc)) !== null) {
+    if (usedConstants.indexOf(cm[1]) === -1) usedConstants.push(cm[1])
+}
+// Only the table itself. Slicing to end-of-file would let a match anywhere in
+// the remaining few thousand lines count as "registered".
+const tableStart = apiSrc.indexOf('const STATIC_WRITABLE_FIELDS')
+const registeredSrc = apiSrc.slice(tableStart, apiSrc.indexOf('\n}\n', tableStart))
+// 'm' so `$` means end-of-line: the last entry in the table carries no comma.
+const unregistered = usedConstants.filter(function (c) {
+    return !new RegExp("': " + c + "(,|$)", 'm').test(registeredSrc)
+})
+check('every whitelist constant in api-handler.js is published under some endpoint',
+    unregistered.length === 0, unregistered)
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed')
 process.exit(fail === 0 ? 0 : 1)

@@ -237,12 +237,98 @@ function defaultSerializeChild(elem) {
 }
 
 // ============================================================
+// Body field sets
+// ============================================================
+
+// Which body fields each generated write accepts, worked out from the family
+// config. The handler factories below validate against these, and
+// createFamilyHandlers puts the same answer on every route it builds, so
+// GET /api/status/capabilities can publish what a build takes without anyone
+// keeping a second list in step with this one.
+//
+// A caller that reads the field list from somewhere other than the code that
+// enforces it ends up proving something narrower than it thinks: that the list
+// it read does not have the field, not that no route accepts it.
+
+function diagramCreateFields(config) {
+    const fields = ['name', 'parentId']
+    // A family that draws more than one kind of diagram has to be told which.
+    if (config.diagrams.types.length > 1) {
+        fields.push('type')
+    }
+    return fields
+}
+
+const DIAGRAM_UPDATE_FIELDS_FAMILY = ['name']
+
+function resourceCreateFields(res) {
+    const fields = ['diagramId', 'name', 'stereotype', 'x1', 'y1', 'x2', 'y2', 'tailViewId', 'lineColor', 'fillColor', 'fontColor']
+    if (res.types.length > 1) {
+        fields.push('type')
+    }
+    if (res.createFields) {
+        res.createFields.forEach(function (f) {
+            const entry = parseFieldEntry(f)
+            if (fields.indexOf(entry.param) === -1) fields.push(entry.param)
+        })
+    }
+    return fields
+}
+
+function resourceUpdateFields(res) {
+    const updateFields = res.updateFields || ['name', 'stereotype', 'documentation']
+    return updateFields.map(resolveFieldDef).map(function (d) { return d.name })
+}
+
+function childCreateFields(child) {
+    const fields = ['name', 'diagramId']
+    if (child.createFields) {
+        child.createFields.forEach(function (f) {
+            const entry = parseFieldEntry(f)
+            if (fields.indexOf(entry.param) === -1) fields.push(entry.param)
+        })
+    }
+    return fields
+}
+
+function childUpdateFields(child) {
+    const updateFields = child.updateFields || ['name', 'documentation']
+    return updateFields.map(resolveFieldDef).map(function (d) { return d.name })
+}
+
+function relationCreateFields(rel) {
+    const fields = ['diagramId', 'sourceId', 'targetId', 'name', 'x1', 'y1', 'x2', 'y2', 'lineColor', 'fillColor', 'fontColor']
+    if (rel.hasEnds) {
+        fields.push('end1')
+        fields.push('end2')
+    }
+    if (rel.createFields) {
+        rel.createFields.forEach(function (f) {
+            const entry = parseFieldEntry(f)
+            if (fields.indexOf(entry.param) === -1) fields.push(entry.param)
+        })
+    }
+    return fields
+}
+
+function relationUpdateFields(rel) {
+    const updateFields = rel.updateFields || ['name', 'documentation']
+    const fields = updateFields.map(resolveFieldDef).map(function (d) { return d.name })
+    if (rel.hasEnds) {
+        if (fields.indexOf('end1') === -1) fields.push('end1')
+        if (fields.indexOf('end2') === -1) fields.push('end2')
+    }
+    return fields
+}
+
+// ============================================================
 // Handler generators
 // ============================================================
 
 /**
  * Build all route handlers for a family config.
- * Returns an array of { method, pattern, handler } objects.
+ * Returns an array of { method, pattern, handler } objects. A route that takes
+ * a body also carries `allowedFields`.
  */
 function createFamilyHandlers(config) {
     const routes = []
@@ -258,7 +344,8 @@ function createFamilyHandlers(config) {
         routes.push({
             method: 'POST',
             pattern: prefix + '/diagrams',
-            handler: makeCreateDiagram(config)
+            handler: makeCreateDiagram(config),
+            allowedFields: diagramCreateFields(config)
         })
         routes.push({
             method: 'GET',
@@ -268,7 +355,8 @@ function createFamilyHandlers(config) {
         routes.push({
             method: 'PUT',
             pattern: prefix + '/diagrams/:id',
-            handler: makeUpdateDiagram(config)
+            handler: makeUpdateDiagram(config),
+            allowedFields: DIAGRAM_UPDATE_FIELDS_FAMILY
         })
         routes.push({
             method: 'DELETE',
@@ -288,7 +376,8 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'POST',
                 pattern: prefix + '/' + res.name,
-                handler: makeCreateResource(config, res)
+                handler: makeCreateResource(config, res),
+                allowedFields: resourceCreateFields(res)
             })
             routes.push({
                 method: 'GET',
@@ -298,7 +387,8 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'PUT',
                 pattern: prefix + '/' + res.name + '/:id',
-                handler: makeUpdateResource(config, res)
+                handler: makeUpdateResource(config, res),
+                allowedFields: resourceUpdateFields(res)
             })
             routes.push({
                 method: 'DELETE',
@@ -317,13 +407,15 @@ function createFamilyHandlers(config) {
                     routes.push({
                         method: 'POST',
                         pattern: prefix + '/' + res.name + '/:id/' + child.name,
-                        handler: makeCreateChild(config, res, child)
+                        handler: makeCreateChild(config, res, child),
+                        allowedFields: childCreateFields(child)
                     })
                     if (child.updateFields) {
                         routes.push({
                             method: 'PUT',
                             pattern: prefix + '/' + res.name + '/:id/' + child.name + '/:childId',
-                            handler: makeUpdateChild(config, res, child)
+                            handler: makeUpdateChild(config, res, child),
+                            allowedFields: childUpdateFields(child)
                         })
                     }
                 })
@@ -342,7 +434,8 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'POST',
                 pattern: prefix + '/' + rel.name,
-                handler: makeCreateRelation(config, rel)
+                handler: makeCreateRelation(config, rel),
+                allowedFields: relationCreateFields(rel)
             })
             routes.push({
                 method: 'GET',
@@ -352,7 +445,8 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'PUT',
                 pattern: prefix + '/' + rel.name + '/:id',
-                handler: makeUpdateRelation(config, rel)
+                handler: makeUpdateRelation(config, rel),
+                allowedFields: relationUpdateFields(rel)
             })
             routes.push({
                 method: 'DELETE',
@@ -374,13 +468,15 @@ function createFamilyHandlers(config) {
                     routes.push({
                         method: 'POST',
                         pattern: prefix + '/' + rel.name + '/:id/' + child.name,
-                        handler: makeCreateChild(config, relAsResource, child)
+                        handler: makeCreateChild(config, relAsResource, child),
+                        allowedFields: childCreateFields(child)
                     })
                     if (child.updateFields) {
                         routes.push({
                             method: 'PUT',
                             pattern: prefix + '/' + rel.name + '/:id/' + child.name + '/:childId',
-                            handler: makeUpdateChild(config, relAsResource, child)
+                            handler: makeUpdateChild(config, relAsResource, child),
+                            allowedFields: childUpdateFields(child)
                         })
                     }
                 })
@@ -412,11 +508,7 @@ function makeListDiagrams(config) {
 }
 
 function makeCreateDiagram(config) {
-    const allowedFields = ['name', 'parentId']
-    // If multiple diagram types, allow 'type' field
-    if (config.diagrams.types.length > 1) {
-        allowedFields.push('type')
-    }
+    const allowedFields = diagramCreateFields(config)
     return function (params, query, body, reqInfo) {
         const err = h.validate([
             h.checkUnknownFields(body, allowedFields),
@@ -504,7 +596,7 @@ function makeGetDiagram(config) {
 function makeUpdateDiagram(config) {
     return function (params, query, body, reqInfo) {
         const err = h.validate([
-            h.checkUnknownFields(body, ['name']),
+            h.checkUnknownFields(body, DIAGRAM_UPDATE_FIELDS_FAMILY),
             h.checkFieldType(body, 'name', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
@@ -648,18 +740,7 @@ function makeListResource(config, res) {
 }
 
 function makeCreateResource(config, res) {
-    const allowedFields = ['diagramId', 'name', 'stereotype', 'x1', 'y1', 'x2', 'y2', 'tailViewId', 'lineColor', 'fillColor', 'fontColor']
-    // If multiple types, allow 'type' field
-    if (res.types.length > 1) {
-        allowedFields.push('type')
-    }
-    // Add extra create fields from config
-    if (res.createFields) {
-        res.createFields.forEach(function (f) {
-            const entry = parseFieldEntry(f)
-            if (allowedFields.indexOf(entry.param) === -1) allowedFields.push(entry.param)
-        })
-    }
+    const allowedFields = resourceCreateFields(res)
 
     return function (params, query, body, reqInfo) {
         const checks = [
@@ -882,7 +963,7 @@ function resolveFieldDef(f) {
 function makeUpdateResource(config, res) {
     const updateFields = res.updateFields || ['name', 'stereotype', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
-    const fieldNames = fieldDefs.map(function (d) { return d.name })
+    const fieldNames = resourceUpdateFields(res)
     const checkTypes = res.modelTypes || res.types
     return function (params, query, body, reqInfo) {
         const checks = [h.checkUnknownFields(body, fieldNames)]
@@ -993,13 +1074,7 @@ function makeListChildren(config, res, child) {
 }
 
 function makeCreateChild(config, res, child) {
-    const allowedFields = ['name', 'diagramId']
-    if (child.createFields) {
-        child.createFields.forEach(function (f) {
-            const entry = parseFieldEntry(f)
-            if (allowedFields.indexOf(entry.param) === -1) allowedFields.push(entry.param)
-        })
-    }
+    const allowedFields = childCreateFields(child)
 
     return function (params, query, body, reqInfo) {
         const err = h.validate([
@@ -1138,7 +1213,7 @@ function makeCreateChild(config, res, child) {
 function makeUpdateChild(config, res, child) {
     const updateFields = child.updateFields || ['name', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
-    const fieldNames = fieldDefs.map(function (d) { return d.name })
+    const fieldNames = childUpdateFields(child)
 
     return function (params, query, body, reqInfo) {
         const checks = [h.checkUnknownFields(body, fieldNames)]
@@ -1247,18 +1322,7 @@ function makeListRelation(config, rel) {
 }
 
 function makeCreateRelation(config, rel) {
-    const allowedFields = ['diagramId', 'sourceId', 'targetId', 'name', 'x1', 'y1', 'x2', 'y2', 'lineColor', 'fillColor', 'fontColor']
-    // Add end1/end2 fields if applicable
-    if (rel.hasEnds) {
-        allowedFields.push('end1')
-        allowedFields.push('end2')
-    }
-    if (rel.createFields) {
-        rel.createFields.forEach(function (f) {
-            const entry = parseFieldEntry(f)
-            if (allowedFields.indexOf(entry.param) === -1) allowedFields.push(entry.param)
-        })
-    }
+    const allowedFields = relationCreateFields(rel)
 
     return function (params, query, body, reqInfo) {
         const err = h.validate([
@@ -1610,12 +1674,7 @@ function makeUpdateRelation(config, rel) {
     const fieldDefs = updateFields.map(resolveFieldDef)
     const fieldNames = fieldDefs.map(function (d) { return d.name })
     const checkTypes = relationTypes(rel)
-    // Add end1/end2 if applicable
-    const allFieldNames = fieldNames.slice()
-    if (rel.hasEnds) {
-        if (allFieldNames.indexOf('end1') === -1) allFieldNames.push('end1')
-        if (allFieldNames.indexOf('end2') === -1) allFieldNames.push('end2')
-    }
+    const allFieldNames = relationUpdateFields(rel)
 
     return function (params, query, body, reqInfo) {
         const checks = [h.checkUnknownFields(body, allFieldNames)]
