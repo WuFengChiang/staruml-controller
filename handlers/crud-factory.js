@@ -233,6 +233,10 @@ function defaultSerializeChild(elem) {
     if (elem.isStatic !== undefined) {
         result.isStatic = elem.isStatic
     }
+    const parameters = h.serializeParameters(elem)
+    if (parameters !== undefined) {
+        result.parameters = parameters
+    }
     return result
 }
 

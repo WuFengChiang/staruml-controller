@@ -1,3 +1,5 @@
+const h = require('./shared-helpers')
+
 module.exports = {
     prefix: 'class',
     label: 'Class/Package Diagram',
@@ -50,7 +52,12 @@ module.exports = {
                     return out
                 })
                 result.operations = (elem.operations || []).map(function (o) {
-                    return { _id: o._id, name: o.name || '', visibility: o.visibility, isStatic: o.isStatic || false }
+                    const out = { _id: o._id, name: o.name || '', visibility: o.visibility, isStatic: o.isStatic || false }
+                    const parameters = h.serializeParameters(o)
+                    if (parameters !== undefined) {
+                        out.parameters = parameters
+                    }
+                    return out
                 })
                 return result
             }

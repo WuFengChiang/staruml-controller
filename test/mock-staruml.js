@@ -114,6 +114,18 @@ class UMLLifeline extends UMLMessageEndpoint {
     }
 }
 class UMLMessage extends UMLModelElement {}
+class UMLCombinedFragment extends UMLModelElement {}
+class UMLInteractionOperand extends UMLModelElement {}
+class UMLStateInvariant extends UMLModelElement {}
+class UMLInteractionUse extends UMLModelElement {}
+// getElement's dispatch checks `instanceof` these ERD classes before falling
+// back to the generic serializer. The mock never builds one — nothing here
+// exercises ERD — but without a class to check against, `instanceof undefined`
+// throws on every call to GET /api/elements/:id, ERD element or not.
+class ERDEntity extends UMLModelElement {}
+class ERDColumn extends UMLModelElement {}
+class ERDDiagram extends UMLModelElement {}
+class ERDRelationship extends UMLModelElement {}
 class UMLRelationship extends UMLModelElement {}
 class UMLDirectedRelationship extends UMLRelationship {
     constructor() {
@@ -400,6 +412,8 @@ const type = {
     UMLEnumeration, UMLPrimitiveType, UMLSignal, UMLComponent, UMLSubsystem,
     UMLUseCaseSubject, UMLPackage, UMLProfile, UMLCollaboration,
     UMLInteraction, UMLMessageEndpoint, UMLLifeline, UMLMessage,
+    UMLCombinedFragment, UMLInteractionOperand, UMLStateInvariant, UMLInteractionUse,
+    ERDEntity, ERDColumn, ERDDiagram, ERDRelationship,
     UMLRelationship, UMLDirectedRelationship, UMLDependency, UMLAbstraction,
     UMLRealization, UMLInterfaceRealization, UMLComponentRealization,
     UMLGeneralization, Hyperlink, Tag, UMLConstraint, UMLSequenceDiagram, UMLClassDiagram,

@@ -12,7 +12,7 @@ const {
     autoExpandFrame, fitFrameToViews, clearEdgeWaypoints,
     createWriteReport, applyProperty, reportIgnoredWrite,
     writeReportMessage, appendWriteWarnings, attachWriteReport, writeValuesEqual,
-    diagramOfView, editorForDiagram, arrangeDiagram, pointsToArray
+    diagramOfView, editorForDiagram, arrangeDiagram, pointsToArray, serializeParameters
 } = require('./handlers/shared-helpers')
 
 // ============================================================
@@ -583,6 +583,22 @@ function serializeElement(elem) {
     // direction has to be visible for the return type to be findable at all.
     if (elem instanceof type.UMLParameter && typeof elem.direction === 'string' && elem.direction !== '') {
         result.direction = elem.direction
+    }
+    // Present on operations, attributes, ports, ... — the family-specific child
+    // listings (e.g. class_list_class_operations) already report these; this
+    // generic getter used to be the only path back to an id that dropped them.
+    if (elem.visibility !== undefined) {
+        result.visibility = elem.visibility
+    }
+    if (elem.isStatic !== undefined) {
+        result.isStatic = elem.isStatic
+    }
+    if (elem.defaultValue !== undefined) {
+        result.defaultValue = elem.defaultValue
+    }
+    const parameters = serializeParameters(elem)
+    if (parameters !== undefined) {
+        result.parameters = parameters
     }
     if (elem.url !== undefined) {
         result.url = elem.url

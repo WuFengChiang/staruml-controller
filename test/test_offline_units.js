@@ -229,6 +229,29 @@ r = api.route('POST', '/api/elements/' + cls._id + '/children',
     { type: 'UMLOperation', name: 'x', direction: 'return' })
 check('direction on a non-parameter child type is rejected', !r.success, r.error)
 
+console.log('\n=== Gap: an operation\'s own id resolves its parameters, without knowing its parent class ===')
+
+r = api.route('GET', '/api/elements/' + op._id)
+check('GET /api/elements/:id on an operation reports its parameters',
+    r.success && Array.isArray(r.data.parameters) && r.data.parameters.length === 1 &&
+    r.data.parameters[0]._id === paramId,
+    r.error || r.data)
+check('the reported parameter carries its type, not just its id',
+    r.success && r.data.parameters[0].typeName === 'String' && r.data.parameters[0].direction === 'out',
+    r.data)
+
+r = api.route('GET', '/api/class/classes/' + cls._id + '/operations')
+check('class_list_class_operations also reports each operation\'s parameters',
+    r.success && r.data.length === 1 && Array.isArray(r.data[0].parameters) &&
+    r.data[0].parameters[0].typeName === 'String',
+    r.error || r.data)
+
+r = api.route('GET', '/api/class/classes/' + cls._id)
+check('the class detail view\'s operations carry parameters too',
+    r.success && r.data.operations.length === 1 && Array.isArray(r.data.operations[0].parameters) &&
+    r.data.operations[0].parameters[0].typeName === 'String',
+    r.error || r.data)
+
 const attr = mock.register(new t.UMLAttribute(), 'total', cls, 'attributes')
 r = api.route('PUT', '/api/elements/' + attr._id, { typeId: dataType._id })
 check('attribute type can now be set by id (was the delete-and-recreate deadlock)',

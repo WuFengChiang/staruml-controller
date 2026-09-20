@@ -96,6 +96,35 @@ function serializeElement(elem) {
     return result
 }
 
+/**
+ * An operation's (or reception's, or signal's) parameter list, typed.
+ *
+ * Three call sites used to serialize an operation without this: the generic
+ * `GET /api/elements/:id`, the family child listing behind
+ * `class_list_class_operations`, and UMLClass's own detail serializer. None of
+ * them exposed a parameter's type, so a caller who only had an operation id —
+ * not its parent class — had no way to read the parameter types back; the only
+ * workaround was reading a sequence-diagram message that happened to reference
+ * the operation's signature.
+ */
+function serializeParameters(elem) {
+    if (!Array.isArray(elem.parameters)) {
+        return undefined
+    }
+    return elem.parameters.map(function (p) {
+        const out = { _id: p._id, name: p.name || '', type: '', direction: p.direction || '' }
+        if (p.type && typeof p.type === 'object') {
+            out.type = p.type.name || ''
+            out.typeId = p.type._id
+            out.typeName = p.type.name || ''
+        } else if (p.type) {
+            out.type = p.type
+            out.typeName = p.type
+        }
+        return out
+    })
+}
+
 function serializeGenericDiagram(diagram) {
     if (!diagram) {
         return null
@@ -743,6 +772,7 @@ module.exports = {
     validationError: validationError,
     // Serialization
     serializeElement: serializeElement,
+    serializeParameters: serializeParameters,
     serializeGenericDiagram: serializeGenericDiagram,
     serializeGenericDiagramDetail: serializeGenericDiagramDetail,
     serializeViewInfo: serializeViewInfo,
