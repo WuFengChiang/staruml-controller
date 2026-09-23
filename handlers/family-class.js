@@ -91,7 +91,7 @@ module.exports = {
             name: 'associations',
             type: 'UMLAssociation',
             hasEnds: true,
-            endFields: ['name', 'navigable', 'aggregation', 'multiplicity']
+            endFields: ['name', 'navigable', 'aggregation', 'multiplicity', 'isDerived', 'isReadOnly', 'isOrdered', 'isUnique']
         },
         { name: 'generalizations', type: 'UMLGeneralization' },
         // UMLAbstraction and SysMLTrace descend from UMLDependency and have no

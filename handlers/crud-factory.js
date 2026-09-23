@@ -183,7 +183,7 @@ function serializeEnd(end, endFields) {
     if (end.reference) {
         result.reference = end.reference._id
     }
-    const fields = endFields || ['name', 'navigable', 'aggregation', 'multiplicity']
+    const fields = endFields || DEFAULT_END_FIELDS
     fields.forEach(function (f) {
         if (end[f] !== undefined) {
             result[f] = end[f]
@@ -315,6 +315,13 @@ function relationCreateFields(rel) {
     return fields
 }
 
+// What end1/end2 take on this relation's create and update, or undefined when
+// the relation has no ends.
+function relationEndFields(rel) {
+    if (!rel.hasEnds) return undefined
+    return (rel.endFields || DEFAULT_END_FIELDS).concat(END_REFERENCE_FIELDS)
+}
+
 function relationUpdateFields(rel) {
     const updateFields = rel.updateFields || ['name', 'documentation']
     const fields = updateFields.map(resolveFieldDef).map(function (d) { return d.name })
@@ -439,7 +446,8 @@ function createFamilyHandlers(config) {
                 method: 'POST',
                 pattern: prefix + '/' + rel.name,
                 handler: makeCreateRelation(config, rel),
-                allowedFields: relationCreateFields(rel)
+                allowedFields: relationCreateFields(rel),
+                allowedEndFields: relationEndFields(rel)
             })
             routes.push({
                 method: 'GET',
@@ -450,7 +458,8 @@ function createFamilyHandlers(config) {
                 method: 'PUT',
                 pattern: prefix + '/' + rel.name + '/:id',
                 handler: makeUpdateRelation(config, rel),
-                allowedFields: relationUpdateFields(rel)
+                allowedFields: relationUpdateFields(rel),
+                allowedEndFields: relationEndFields(rel)
             })
             routes.push({
                 method: 'DELETE',
@@ -1342,6 +1351,10 @@ function makeCreateRelation(config, rel) {
             const valErr = checkFieldValues(body, rel.createFields.map(parseFieldEntry))
             if (valErr) return h.validationError(valErr, reqInfo, body)
         }
+        if (rel.hasEnds) {
+            const endValErr = checkEndFieldValues(body, rel.endFields)
+            if (endValErr) return h.validationError(endValErr, reqInfo, body)
+        }
 
         if (!body.diagramId) {
             return h.validationError('Field "diagramId" is required', reqInfo, body)
@@ -1480,6 +1493,69 @@ function makeCreateRelation(config, rel) {
 // xxxId convention the rest of the API uses for element references.
 const END_REFERENCE_FIELDS = ['reference', 'referenceId']
 
+const DEFAULT_END_FIELDS = ['name', 'navigable', 'aggregation', 'multiplicity']
+
+// Value rules for the fields a relation end can carry, from UMLRelationshipEnd
+// in StarUML's uml/metamodel.json. `navigable` is a UMLNavigableKind string, not
+// a boolean: the edge view compares it against these literals, so a stored
+// `true` passes a read-back and draws the arrow on the wrong end.
+const NAVIGABLE_KINDS = ['unspecified', 'navigable', 'notNavigable']
+const AGGREGATION_KINDS = ['none', 'shared', 'composite']
+const END_FIELD_RULES = {
+    name: { type: 'string' },
+    multiplicity: { type: 'string' },
+    navigable: { type: 'string', values: NAVIGABLE_KINDS },
+    aggregation: { type: 'string', values: AGGREGATION_KINDS },
+    isDerived: { type: 'boolean' },
+    isReadOnly: { type: 'boolean' },
+    isOrdered: { type: 'boolean' },
+    isUnique: { type: 'boolean' }
+}
+
+// A boolean `navigable` is what callers sent before this was a string.
+function endFieldValue(field, value) {
+    if (field === 'navigable' && typeof value === 'boolean') {
+        return value ? 'navigable' : 'notNavigable'
+    }
+    return value
+}
+
+/**
+ * The first end field in the body whose value the model would not accept.
+ * Runs before anything is written, so one bad value cannot leave the other
+ * fields of the same request half-applied.
+ */
+function checkEndFieldValues(body, endFields) {
+    const fields = endFields || DEFAULT_END_FIELDS
+    const ends = ['end1', 'end2']
+    for (let i = 0; i < ends.length; i++) {
+        const endName = ends[i]
+        const values = body[endName]
+        if (values === undefined || values === null) {
+            continue
+        }
+        if (typeof values !== 'object' || Array.isArray(values)) {
+            return 'Field "' + endName + '" must be an object of end fields: ' + fields.concat(END_REFERENCE_FIELDS).join(', ')
+        }
+        for (let j = 0; j < fields.length; j++) {
+            const f = fields[j]
+            const rule = END_FIELD_RULES[f]
+            if (!rule || values[f] === undefined) {
+                continue
+            }
+            const v = endFieldValue(f, values[f])
+            if (typeof v !== rule.type) {
+                return 'Field "' + endName + '.' + f + '" must be a ' + rule.type +
+                    (rule.values ? ' (' + rule.values.join(', ') + ')' : '') + '. Got ' + JSON.stringify(values[f])
+            }
+            if (rule.values && rule.values.indexOf(v) === -1) {
+                return 'Invalid ' + endName + '.' + f + ' "' + v + '". Allowed: ' + rule.values.join(', ')
+            }
+        }
+    }
+    return null
+}
+
 /**
  * Move one end of a relation to a different element, and move every view of
  * that relation with it.
@@ -1612,13 +1688,14 @@ function repointRelationViews(relation, endName, target, report) {
 }
 
 function applyEndFields(end, values, endFields, report, endName, relation) {
-    const fields = endFields || ['name', 'navigable', 'aggregation', 'multiplicity']
+    const fields = endFields || DEFAULT_END_FIELDS
     fields.forEach(function (f) {
         if (values[f] !== undefined) {
+            const v = endFieldValue(f, values[f])
             if (report) {
-                h.applyProperty(report, end, f, values[f], (endName || 'end') + '.' + f)
+                h.applyProperty(report, end, f, v, (endName || 'end') + '.' + f)
             } else {
-                app.engine.setProperty(end, f, values[f])
+                app.engine.setProperty(end, f, v)
             }
         }
     })
@@ -1704,7 +1781,7 @@ function makeUpdateRelation(config, rel) {
         // leave the relation half-moved, with one end rewritten and the other
         // rejected.
         if (rel.hasEnds) {
-            const endErr = checkEndReferences(elem, body)
+            const endErr = checkEndFieldValues(body, rel.endFields) || checkEndReferences(elem, body)
             if (endErr) {
                 return h.validationError(endErr, reqInfo, body)
             }
@@ -1872,5 +1949,7 @@ module.exports = {
     defaultSerializeNode: defaultSerializeNode,
     defaultSerializeRelation: defaultSerializeRelation,
     defaultSerializeChild: defaultSerializeChild,
-    serializeEnd: serializeEnd
+    serializeEnd: serializeEnd,
+    NAVIGABLE_KINDS: NAVIGABLE_KINDS,
+    AGGREGATION_KINDS: AGGREGATION_KINDS
 }

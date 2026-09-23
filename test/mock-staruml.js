@@ -138,9 +138,13 @@ class UMLAssociationEnd extends UMLAttribute {
     constructor() {
         super()
         this.reference = null
-        this.navigable = true
+        this.navigable = 'unspecified'
         this.aggregation = 'none'
         this.multiplicity = ''
+        this.isDerived = false
+        this.isReadOnly = false
+        this.isOrdered = false
+        this.isUnique = false
     }
 }
 class UMLUndirectedRelationship extends UMLRelationship {

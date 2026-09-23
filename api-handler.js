@@ -1033,7 +1033,12 @@ const EDGE_ROUTE_FIELDS = ['margin', 'grid']
 // `typeId` name the type that element HAS (Money). That endpoint keeps both and
 // no alias.
 const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId',
-    'typeId', 'typeName', 'type', 'direction', 'specification', 'constrainedElementIds']
+    'typeId', 'typeName', 'type', 'direction', 'specification', 'constrainedElementIds',
+    'isDerived', 'isReadOnly', 'isOrdered', 'isUnique']
+// Boolean flags that UMLRelationshipEnd, UMLAttribute and the other structural
+// features carry. An element either has the property or does not, so the check
+// is the element's own value, not a list of types.
+const GENERIC_ELEMENT_FLAG_FIELDS = ['isDerived', 'isReadOnly', 'isOrdered', 'isUnique']
 const EXPORT_ALLOWED_FIELDS = ['path', 'format']
 const VALID_EXPORT_FORMATS = ['png', 'jpeg', 'svg', 'pdf']
 
@@ -6340,7 +6345,9 @@ function updateGenericElement(id, body, reqInfo) {
         checkFieldType(body, 'type', 'string'),
         checkFieldType(body, 'direction', 'string'),
         checkFieldType(body, 'specification', 'string')
-    ])
+    ].concat(GENERIC_ELEMENT_FLAG_FIELDS.map(function (f) {
+        return checkFieldType(body, f, 'boolean')
+    })))
     if (err) {
         return validationError(err, reqInfo, body)
     }
@@ -6388,6 +6395,12 @@ function updateGenericElement(id, body, reqInfo) {
     }
     if (body.constrainedElementIds !== undefined && !isConstraint) {
         return validationError('Field "constrainedElementIds" is only supported for UMLConstraint elements. Got ' + elem.constructor.name, reqInfo, body)
+    }
+    const flagsGiven = GENERIC_ELEMENT_FLAG_FIELDS.filter(function (f) { return body[f] !== undefined })
+    for (let fi = 0; fi < flagsGiven.length; fi++) {
+        if (typeof elem[flagsGiven[fi]] !== 'boolean') {
+            return validationError('Field "' + flagsGiven[fi] + '" is not a property of ' + elem.constructor.name, reqInfo, body)
+        }
     }
 
     // Resolve every id before writing any of them, so a typo in the middle of
@@ -6457,6 +6470,9 @@ function updateGenericElement(id, body, reqInfo) {
     if (constrainedTargets) {
         setRefsCollection(report, elem, 'constrainedElements', constrainedTargets, 'constrainedElementIds')
     }
+    flagsGiven.forEach(function (f) {
+        applyProperty(report, elem, f, body[f])
+    })
 
     return attachWriteReport({
         success: true,
@@ -9080,6 +9096,31 @@ function familyWritableFields() {
     return out
 }
 
+// What end1/end2 accept on each relation route, keyed like writableFields.
+// Kept out of writableFields because every "METHOD /path" key there is the
+// top-level body list that path checks against.
+function familyWritableEndFields() {
+    const out = {}
+    familyConfigs.forEach(function (config) {
+        crudFactory.createFamilyHandlers(config).forEach(function (r) {
+            if (r.allowedEndFields) {
+                out[r.method + ' ' + r.pattern] = r.allowedEndFields
+            }
+        })
+    })
+    return out
+}
+
+function unionOfLists(byKey) {
+    const union = []
+    Object.keys(byKey).forEach(function (k) {
+        byKey[k].forEach(function (f) {
+            if (union.indexOf(f) === -1) union.push(f)
+        })
+    })
+    return union
+}
+
 /**
  * Full type and endpoint listing for GET /api/status/capabilities.
  */
@@ -9114,17 +9155,22 @@ function buildCapabilities() {
         // tool's schema answers a narrower question: whether that tool declares
         // X. The two are not the same, and treating them as the same has
         // produced false conclusions before.
+        // A relation end's `navigable` is one of these strings, not a boolean.
+        allowedNavigableKinds: crudFactory.NAVIGABLE_KINDS,
+        allowedAggregationKinds: crudFactory.AGGREGATION_KINDS,
         writableFields: Object.assign(
             familyWritableFields(),
             STATIC_WRITABLE_FIELDS,
             {
-                // Relation ends take these inside end1/end2, so they belong to
-                // no single path. `reference` moves the end to a different
-                // element and re-points every view of the relation;
-                // `referenceId` is the same field under the other name.
-                'relation end (end1/end2)': ['name', 'navigable', 'aggregation', 'multiplicity', 'reference', 'referenceId']
+                // Every field any relation end takes inside end1/end2; each
+                // route's own list is in writableEndFields. `reference` moves
+                // the end to a different element and re-points every view of
+                // the relation; `referenceId` is the same field under the
+                // other name.
+                'relation end (end1/end2)': unionOfLists(familyWritableEndFields())
             }
         ),
+        writableEndFields: familyWritableEndFields(),
         endpoints: [
             'GET  /api/status',
             'GET  /api/status/capabilities',

@@ -798,6 +798,58 @@ check('an unknown end field is still reported',
 check('and the settable list now includes reference',
     r.ignored.some(function (i) { return /reference/.test(i.reason || '') }), r.ignored)
 
+console.log('\n=== C-26: navigable is a UMLNavigableKind string, not a boolean ===')
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { navigable: 'navigable' }, end2: { navigable: 'notNavigable' } })
+check('the three-valued strings are written as given',
+    r.success === true && movable.end1.navigable === 'navigable' && movable.end2.navigable === 'notNavigable', r)
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { navigable: false }, end2: { navigable: true } })
+check('a boolean is stored as the string it stands for',
+    r.success === true && movable.end1.navigable === 'notNavigable' && movable.end2.navigable === 'navigable',
+    [movable.end1.navigable, movable.end2.navigable])
+
+r = api.route('GET', '/api/class/associations/' + movable._id)
+check('the read side returns the string, not a boolean',
+    r.success && r.data.end1.navigable === 'notNavigable' && r.data.end2.navigable === 'navigable', r.data)
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { multiplicity: '1' }, end2: { navigable: 'yes' } })
+check('an unknown navigable value is refused with the allowed list',
+    r.success === false && /unspecified, navigable, notNavigable/.test(r.error || ''), r)
+check('and nothing in that request was written, end1 included',
+    movable.end1.multiplicity === '0..*' && movable.end2.navigable === 'navigable',
+    [movable.end1.multiplicity, movable.end2.navigable])
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { aggregation: 'strong' } })
+check('an unknown aggregation value is refused too',
+    r.success === false && /none, shared, composite/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { isDerived: true, isOrdered: true } })
+check('a class association end takes isDerived and isOrdered',
+    r.success === true && movable.end1.isDerived === true && movable.end1.isOrdered === true, r)
+r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { isDerived: 'true' } })
+check('and refuses a string where a boolean belongs',
+    r.success === false && /must be a boolean/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/elements/' + movable.end2._id, { isDerived: true, isUnique: true })
+check('C-22: PUT /api/elements takes isDerived and isUnique on an association end',
+    r.success === true && movable.end2.isDerived === true && movable.end2.isUnique === true, r)
+r = api.route('PUT', '/api/elements/' + gapHolder._id, { isDerived: true })
+check('and names the element type when that element has no such property',
+    r.success === false && /not a property of UMLClass/.test(r.error || ''), r)
+
+r = api.route('GET', '/api/status/capabilities')
+const endCaps = r.data || {}
+check('capabilities publish the navigable kinds',
+    JSON.stringify(endCaps.allowedNavigableKinds) === JSON.stringify(['unspecified', 'navigable', 'notNavigable']), endCaps.allowedNavigableKinds)
+check('and the class association end fields under its own route',
+    (endCaps.writableEndFields['PUT /api/class/associations/:id'] || []).indexOf('isDerived') !== -1,
+    endCaps.writableEndFields)
+check('and the union of end fields includes them',
+    endCaps.writableFields['relation end (end1/end2)'].indexOf('isDerived') !== -1 &&
+    endCaps.writableFields['relation end (end1/end2)'].indexOf('referenceId') !== -1,
+    endCaps.writableFields['relation end (end1/end2)'])
+
 console.log('\n=== A-2: an edge label takes a position in left/top ===')
 
 const labelEdge = assocViewMain
