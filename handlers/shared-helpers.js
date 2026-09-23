@@ -121,6 +121,9 @@ function serializeParameters(elem) {
             out.type = p.type
             out.typeName = p.type
         }
+        if (typeof p.multiplicity === 'string' && p.multiplicity !== '') {
+            out.multiplicity = p.multiplicity
+        }
         return out
     })
 }

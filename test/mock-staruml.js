@@ -45,9 +45,20 @@ class UMLStructuralFeature extends UMLFeature {
         this.visibility = 'public'
         this.isStatic = false
         this.defaultValue = ''
+        // extensions/essential/uml/metamodel.json gives UMLStructuralFeature
+        // these four, and UMLAttribute adds isDerived.
+        this.multiplicity = ''
+        this.isReadOnly = false
+        this.isOrdered = false
+        this.isUnique = false
     }
 }
-class UMLAttribute extends UMLStructuralFeature {}
+class UMLAttribute extends UMLStructuralFeature {
+    constructor() {
+        super()
+        this.isDerived = false
+    }
+}
 class UMLPort extends UMLAttribute {}
 // SysMLProperty extends UMLAttribute, and SysMLFlowProperty extends that with a
 // direction of its own — SysMLFlowDirectionKind, which has no "return".

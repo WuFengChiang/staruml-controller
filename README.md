@@ -217,6 +217,29 @@ anything is written, so a rejected update leaves the lifeline exactly as it was 
 earlier it applied the name first and reported the failure afterwards, and the
 name really had changed.
 
+## Setting an Attribute's or Parameter's Multiplicity
+
+`multiplicity` is a string, stored as given. A class box draws it after the type,
+e.g. `snapshots: Snapshot[0..*]`, while the view's `showMultiplicity` is on (the
+default). An empty string clears it. StarUML does not check the format, and
+neither does this API.
+
+| Endpoint | Takes `multiplicity` on |
+|---|---|
+| `POST /api/class/classes/:id/attributes`, `POST /api/class/interfaces/:id/attributes` | the attribute it creates |
+| `POST /api/elements/:id/children` | a structural feature it creates (UMLAttribute, UMLParameter, UMLPort, ...) |
+| `PUT /api/elements/:id` | any element that has the property: attributes, parameters, ports, relation ends |
+
+`PUT /api/elements/:id` refuses it on an element without the property, and names
+that element's type. `GET /api/elements/:id`, the class detail's attribute list
+and every parameter list report it when it is not empty.
+
+```bash
+curl -X PUT "http://localhost:12345/api/elements/$ATTRIBUTE_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"multiplicity":"0..1","isDerived":true}'
+```
+
 ## Placing a New Element
 
 Every create-on-a-diagram endpoint takes `x1`, `y1`, `x2`, `y2`. `x1`/`y1` are the
@@ -753,10 +776,10 @@ something is waiting for a button.
 |---|---|---|
 | `/api/status` | GET | Health check. Small payload: status, version, and the open project |
 | `/api/status/capabilities` | GET | Allowed type lists and the full endpoint list (~46 KB) |
-| `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element. PUT takes `name` (empty string clears it), `stereotype`, `documentation`, `referenceId`, for structural features `typeId`/`typeName`/`type`/`direction`, and for a UMLConstraint `specification`/`constrainedElementIds` |
+| `/api/elements/:id` | GET / PUT / DELETE | Get, update, or delete any element. PUT takes `name` (empty string clears it), `stereotype`, `documentation`, `referenceId`, for structural features `typeId`/`typeName`/`type`/`direction`, `multiplicity` for attributes, parameters, ports and relation ends, the booleans `isDerived` / `isReadOnly` / `isOrdered` / `isUnique` where the element has them, and for a UMLConstraint `specification`/`constrainedElementIds` |
 | `/api/elements/:id/tags` | GET / POST | List or create tags |
 | `/api/tags/:id` | GET / PUT / DELETE | Get, update, or delete tag |
-| `/api/elements/:id/children` | GET / POST | List or create child elements — features, constraints, and now classifiers and packages with no view. GET takes `?field=parameters` to list one container. POST refuses a `field` the parent does not carry |
+| `/api/elements/:id/children` | GET / POST | List or create child elements — features, constraints, and now classifiers and packages with no view. GET takes `?field=parameters` to list one container. POST refuses a `field` the parent does not carry, and takes `multiplicity` for structural features |
 | `/api/elements/:id/relationships` | GET | Get all relationships of an element |
 | `/api/elements/:id/views` | GET | Get all views of an element |
 | `/api/elements/:id/relocate` | PUT | Move element to a different parent |
@@ -856,13 +879,13 @@ Each diagram family below provides dedicated CRUD endpoints with type-specific v
 | `/api/class/diagrams/:id` | GET / PUT / DELETE | Get, update, or delete diagram |
 | `/api/class/classes` | GET / POST | List or create classes |
 | `/api/class/classes/:id` | GET / PUT / DELETE | Get, update, or delete class |
-| `/api/class/classes/:id/attributes` | GET / POST | List or create attributes |
+| `/api/class/classes/:id/attributes` | GET / POST | List or create attributes. POST takes `name`, `type`, `visibility`, `isStatic`, `defaultValue`, `multiplicity` |
 | `/api/class/classes/:id/operations` | GET / POST | List or create operations |
 | `/api/class/classes/:id/receptions` | GET / POST | List or create receptions |
 | `/api/class/classes/:id/template-parameters` | GET / POST | List or create template parameters |
 | `/api/class/interfaces` | GET / POST | List or create interfaces |
 | `/api/class/interfaces/:id` | GET / PUT / DELETE | Get, update, or delete interface |
-| `/api/class/interfaces/:id/attributes` | GET / POST | List or create attributes |
+| `/api/class/interfaces/:id/attributes` | GET / POST | List or create attributes. POST takes `name`, `type`, `visibility`, `multiplicity` |
 | `/api/class/interfaces/:id/operations` | GET / POST | List or create operations |
 | `/api/class/enumerations` | GET / POST | List or create enumerations |
 | `/api/class/enumerations/:id` | GET / PUT / DELETE | Get, update, or delete enumeration |

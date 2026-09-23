@@ -224,6 +224,9 @@ function defaultSerializeChild(elem) {
     if (elem.direction !== undefined) {
         result.direction = elem.direction
     }
+    if (typeof elem.multiplicity === 'string' && elem.multiplicity !== '') {
+        result.multiplicity = elem.multiplicity
+    }
     if (elem.defaultValue !== undefined) {
         result.defaultValue = elem.defaultValue
     }
@@ -1093,7 +1096,8 @@ function makeCreateChild(config, res, child) {
         const err = h.validate([
             h.checkUnknownFields(body, allowedFields),
             h.checkFieldType(body, 'name', 'string'),
-            h.checkFieldType(body, 'diagramId', 'string')
+            h.checkFieldType(body, 'diagramId', 'string'),
+            h.checkFieldType(body, 'multiplicity', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
 

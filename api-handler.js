@@ -359,7 +359,7 @@ const GENERIC_RELATION_CREATE_FIELDS = ['type', 'sourceId', 'targetId', 'name']
 const DIAGRAM_AS_PARENT_TYPES = ['SysMLConstraintParameter']
 // `type` here is the element class to create (e.g. 'UMLParameter'). The type a
 // structural feature *has* is a separate concept and goes in typeId/typeName.
-const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field', 'typeId', 'typeName', 'direction', 'specification']
+const GENERIC_CHILD_CREATE_FIELDS = ['type', 'name', 'field', 'typeId', 'typeName', 'direction', 'specification', 'multiplicity']
 // Which classes carry a `direction`, and what each one accepts. Both lists come
 // from StarUML's metamodel, and they are NOT the same set: UMLParameter uses
 // UMLDirectionKind ("in", "inout", "out", "return") while SysMLFlowProperty uses
@@ -568,6 +568,10 @@ function serializeElement(elem) {
         // /api/elements/:id now accepts. Emitting it as well means a caller can
         // read back whichever name it wrote.
         result.type = result.typeName
+    }
+    // Attributes, parameters, ports and relation ends. '' means not stated.
+    if (typeof elem.multiplicity === 'string' && elem.multiplicity !== '') {
+        result.multiplicity = elem.multiplicity
     }
     // A UMLConstraint's canvas label is its specification, and constrainedElements
     // is the only machine-readable part of it. Report both so a caller can read
@@ -1034,7 +1038,7 @@ const EDGE_ROUTE_FIELDS = ['margin', 'grid']
 // no alias.
 const GENERIC_ELEMENT_UPDATE_FIELDS = ['name', 'stereotype', 'documentation', 'referenceId',
     'typeId', 'typeName', 'type', 'direction', 'specification', 'constrainedElementIds',
-    'isDerived', 'isReadOnly', 'isOrdered', 'isUnique']
+    'isDerived', 'isReadOnly', 'isOrdered', 'isUnique', 'multiplicity']
 // Boolean flags that UMLRelationshipEnd, UMLAttribute and the other structural
 // features carry. An element either has the property or does not, so the check
 // is the element's own value, not a list of types.
@@ -6330,6 +6334,12 @@ function checkFeatureFieldsSupported(typeName, isStructuralFeature, body, featur
 function checkFeatureFieldsForChildType(className, body, featureType) {
     const childClass = type[className]
     const isStructuralFeature = !!childClass && childClass.prototype instanceof type.UMLStructuralFeature
+    // Every UMLStructuralFeature carries `multiplicity` in StarUML's metamodel.
+    // PUT /api/elements/:id checks the element's own property instead, because
+    // relation ends have one too and are not structural features.
+    if (body.multiplicity !== undefined && !isStructuralFeature) {
+        return 'Field "multiplicity" is only supported for structural features (UMLAttribute, UMLParameter, UMLPort, ...). Got ' + className
+    }
     return checkFeatureFieldsSupported(className, isStructuralFeature, body, featureType)
 }
 
@@ -6344,7 +6354,8 @@ function updateGenericElement(id, body, reqInfo) {
         checkFieldType(body, 'typeName', 'string'),
         checkFieldType(body, 'type', 'string'),
         checkFieldType(body, 'direction', 'string'),
-        checkFieldType(body, 'specification', 'string')
+        checkFieldType(body, 'specification', 'string'),
+        checkFieldType(body, 'multiplicity', 'string')
     ].concat(GENERIC_ELEMENT_FLAG_FIELDS.map(function (f) {
         return checkFieldType(body, f, 'boolean')
     })))
@@ -6401,6 +6412,11 @@ function updateGenericElement(id, body, reqInfo) {
         if (typeof elem[flagsGiven[fi]] !== 'boolean') {
             return validationError('Field "' + flagsGiven[fi] + '" is not a property of ' + elem.constructor.name, reqInfo, body)
         }
+    }
+    // Attributes, parameters, ports and relation ends carry it. An empty string
+    // clears it, which is how StarUML stores "not stated".
+    if (body.multiplicity !== undefined && typeof elem.multiplicity !== 'string') {
+        return validationError('Field "multiplicity" is not a property of ' + elem.constructor.name, reqInfo, body)
     }
 
     // Resolve every id before writing any of them, so a typo in the middle of
@@ -6473,6 +6489,9 @@ function updateGenericElement(id, body, reqInfo) {
     flagsGiven.forEach(function (f) {
         applyProperty(report, elem, f, body[f])
     })
+    if (body.multiplicity !== undefined) {
+        applyProperty(report, elem, 'multiplicity', body.multiplicity)
+    }
 
     return attachWriteReport({
         success: true,
@@ -7306,7 +7325,8 @@ function createChildElement(parentId, body, reqInfo) {
         checkFieldType(body, 'typeId', 'string|null'),
         checkFieldType(body, 'typeName', 'string'),
         checkFieldType(body, 'direction', 'string'),
-        checkFieldType(body, 'specification', 'string')
+        checkFieldType(body, 'specification', 'string'),
+        checkFieldType(body, 'multiplicity', 'string')
     ])
     if (err) {
         return validationError(err, reqInfo, body)
@@ -7405,6 +7425,9 @@ function createChildElement(parentId, body, reqInfo) {
         }
         if (body.specification !== undefined) {
             applyProperty(report, model, 'specification', body.specification)
+        }
+        if (body.multiplicity !== undefined) {
+            applyProperty(report, model, 'multiplicity', body.multiplicity)
         }
 
         const data = serializeElement(model)

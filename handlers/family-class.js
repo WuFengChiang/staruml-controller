@@ -15,7 +15,7 @@ module.exports = {
                 { name: 'isActive', type: 'boolean' }
             ],
             children: [
-                { name: 'attributes', type: 'UMLAttribute', field: 'attributes', createFields: ['name', 'type', 'visibility', 'isStatic', 'defaultValue'] },
+                { name: 'attributes', type: 'UMLAttribute', field: 'attributes', createFields: ['name', 'type', 'visibility', 'isStatic', 'defaultValue', 'multiplicity'] },
                 { name: 'operations', type: 'UMLOperation', field: 'operations', createFields: ['name', 'visibility', 'isStatic'] },
                 { name: 'receptions', type: 'UMLReception', field: 'receptions' },
                 { name: 'template-parameters', type: 'UMLTemplateParameter', field: 'templateParameters' }
@@ -49,6 +49,9 @@ module.exports = {
                         out.type = a.type
                         out.typeName = a.type
                     }
+                    if (typeof a.multiplicity === 'string' && a.multiplicity !== '') {
+                        out.multiplicity = a.multiplicity
+                    }
                     return out
                 })
                 result.operations = (elem.operations || []).map(function (o) {
@@ -66,7 +69,7 @@ module.exports = {
             name: 'interfaces',
             types: ['UMLInterface'],
             children: [
-                { name: 'attributes', type: 'UMLAttribute', field: 'attributes', createFields: ['name', 'type', 'visibility'] },
+                { name: 'attributes', type: 'UMLAttribute', field: 'attributes', createFields: ['name', 'type', 'visibility', 'multiplicity'] },
                 { name: 'operations', type: 'UMLOperation', field: 'operations', createFields: ['name', 'visibility'] }
             ]
         },

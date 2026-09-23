@@ -854,6 +854,66 @@ check('and the union of end fields includes them',
     endCaps.writableFields['relation end (end1/end2)'].indexOf('referenceId') !== -1,
     endCaps.writableFields['relation end (end1/end2)'])
 
+console.log('\n=== An attribute\'s or parameter\'s multiplicity is writable and reads back ===')
+
+r = api.route('POST', '/api/class/classes/' + gapHolder._id + '/attributes', { name: 'snapshots', type: 'String', multiplicity: '0..*' })
+check('POST .../attributes takes multiplicity',
+    r.success === true && r.data.multiplicity === '0..*', r.error || r.data)
+const multAttrId = r.success ? r.data._id : null
+const multAttr = mock.store.filter(function (e) { return e._id === multAttrId })[0]
+check('and stores it on the model as the string StarUML draws',
+    !!multAttr && multAttr.multiplicity === '0..*', multAttr && multAttr.multiplicity)
+
+r = api.route('POST', '/api/class/classes/' + gapHolder._id + '/attributes', { name: 'bad', multiplicity: 3 })
+check('POST .../attributes refuses a non-string multiplicity',
+    r.success === false && /multiplicity/.test(r.error || ''), r)
+
+r = api.route('PUT', '/api/elements/' + multAttrId, { multiplicity: '0..1', isDerived: true })
+check('PUT /api/elements/:id takes multiplicity on an attribute',
+    r.success === true && multAttr.multiplicity === '0..1' && multAttr.isDerived === true, r.error || r.data)
+r = api.route('GET', '/api/elements/' + multAttrId)
+check('GET /api/elements/:id reads it back',
+    r.success === true && r.data.multiplicity === '0..1', r.error || r.data)
+r = api.route('GET', '/api/class/classes/' + gapHolder._id)
+const listedAttr = r.success ? r.data.attributes.filter(function (a) { return a._id === multAttrId })[0] : null
+check('and so does the class detail\'s attribute list',
+    !!listedAttr && listedAttr.multiplicity === '0..1', r.error || listedAttr)
+
+r = api.route('PUT', '/api/elements/' + multAttrId, { multiplicity: '' })
+check('an empty string clears it',
+    r.success === true && multAttr.multiplicity === '' && r.data.multiplicity === undefined, r.error || r.data)
+
+r = api.route('PUT', '/api/elements/' + multAttrId, { multiplicity: 1 })
+check('PUT refuses a non-string multiplicity',
+    r.success === false && /multiplicity/.test(r.error || ''), r)
+r = api.route('PUT', '/api/elements/' + gapHolder._id, { multiplicity: '1' })
+check('and names the element type when that element has no multiplicity',
+    r.success === false && /"multiplicity" is not a property of UMLClass/.test(r.error || ''), r)
+r = api.route('PUT', '/api/elements/' + movable.end1._id, { multiplicity: '1..*' })
+check('a relation end takes it through the same endpoint',
+    r.success === true && movable.end1.multiplicity === '1..*', r.error || r.data)
+
+const multOp = mock.register(new t.UMLOperation(), 'sync', gapHolder, 'operations')
+r = api.route('POST', '/api/elements/' + multOp._id + '/children',
+    { type: 'UMLParameter', name: 'ids', typeName: 'String', multiplicity: '1..*' })
+check('POST /api/elements/:id/children takes multiplicity on a parameter',
+    r.success === true && r.data.multiplicity === '1..*', r.error || r.data)
+r = api.route('GET', '/api/elements/' + multOp._id)
+check('and the operation\'s parameter list reads it back',
+    r.success === true && r.data.parameters[0].multiplicity === '1..*', r.error || r.data)
+r = api.route('POST', '/api/elements/' + gapHolder._id + '/children',
+    { type: 'UMLOperation', name: 'x', multiplicity: '1' })
+check('and refuses it on a child type that is not a structural feature',
+    r.success === false && /"multiplicity" is only supported for structural features/.test(r.error || ''), r)
+
+r = api.route('GET', '/api/status/capabilities')
+const multCaps = (r.data || {}).writableFields || {}
+check('capabilities list multiplicity under every endpoint that takes it',
+    ['PUT /api/elements/:id', 'POST /api/elements/:id/children',
+        'POST /api/class/classes/:id/attributes', 'POST /api/class/interfaces/:id/attributes'
+    ].every(function (k) { return (multCaps[k] || []).indexOf('multiplicity') !== -1 }),
+    multCaps['POST /api/class/classes/:id/attributes'])
+
 console.log('\n=== A-2: an edge label takes a position in left/top ===')
 
 const labelEdge = assocViewMain
