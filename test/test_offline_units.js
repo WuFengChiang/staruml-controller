@@ -824,6 +824,10 @@ r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { aggrega
 check('an unknown aggregation value is refused too',
     r.success === false && /none, shared, composite/.test(r.error || ''), r)
 
+r = api.route('POST', '/api/class/associations', { diagramId: gapClassDiagram._id, sourceId: gapHolder._id, targetId: oldTarget._id, end1: { navigable: 'yes' } })
+check('create refuses an unknown navigable value before building anything',
+    r.success === false && /unspecified, navigable, notNavigable/.test(r.error || ''), r)
+
 r = api.route('PUT', '/api/class/associations/' + movable._id, { end1: { isDerived: true, isOrdered: true } })
 check('a class association end takes isDerived and isOrdered',
     r.success === true && movable.end1.isDerived === true && movable.end1.isOrdered === true, r)

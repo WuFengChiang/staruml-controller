@@ -872,7 +872,7 @@ Each diagram family below provides dedicated CRUD endpoints with type-specific v
 | `/api/class/packages` | GET / POST | List or create packages |
 | `/api/class/packages/:id` | GET / PUT / DELETE | Get, update, or delete package |
 | `/api/class/associations` | GET / POST | List or create associations |
-| `/api/class/associations/:id` | GET / PUT / DELETE | Get, update, or delete association. PUT takes `end1`/`end2` with `name`, `navigable`, `aggregation`, `multiplicity` and `reference` — see *Moving a Relation's Endpoint* |
+| `/api/class/associations/:id` | GET / PUT / DELETE | Get, update, or delete association. PUT takes `end1`/`end2` with `name`, `navigable` (`unspecified` / `navigable` / `notNavigable`), `aggregation` (`none` / `shared` / `composite`), `multiplicity`, the booleans `isDerived` / `isReadOnly` / `isOrdered` / `isUnique`, and `reference` — see *Moving a Relation's Endpoint* |
 | `/api/class/generalizations` | GET / POST | List or create generalizations |
 | `/api/class/generalizations/:id` | GET / PUT / DELETE | Get, update, or delete generalization |
 | `/api/class/dependencies` | GET / POST | List or create dependencies |
