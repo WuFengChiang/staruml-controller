@@ -8086,38 +8086,90 @@ function exportAllDiagrams(body, reqInfo) {
 
 // --- 3C. Project Operations ---
 
-function newProject(reqInfo) {
+/**
+ * Run a command that replaces the open project, and report whether it did.
+ *
+ * A command returning is not proof. On StarUML 8, project:new and project:close
+ * on a project with unsaved changes open a "save changes?" dialog and return at
+ * once; the project is only replaced after the user answers. Measured live on
+ * 8.1.0: both commands returned, and the project's name and diagrams were
+ * unchanged 20 seconds later while the dialog waited.
+ *
+ * Neither the project's _id nor the project object tells whether it was
+ * replaced on StarUML 8:
+ *   - A new project is built from resources/templates/Default.mdj, whose
+ *     Project has the fixed id "AAAAAAFF+h6SjaM2Hec=", so every new project
+ *     has the same _id as the last one.
+ *   - StarUML 8 refills the same Project object in place. Measured on 8.1.0
+ *     with an unmodified project: after project:new, getProject() returned the
+ *     same object, but a property set on it before the command was gone.
+ * What does tell is the project's events. In the same measurement project:new
+ * emitted projectClosed and then projectLoaded before the command returned.
+ * So a projectCreated or projectLoaded during the command counts as replaced.
+ * A different object from getProject() also counts, for StarUML 7, which
+ * builds a new Project object.
+ */
+function replaceProject(commandId, done, failed, reqInfo) {
+    const before = app.project.getProject()
+    const hadChanges = typeof app.repository.isModified === 'function' && app.repository.isModified()
+    let loaded = false
+    const onLoad = function () { loaded = true }
+    const canListen = typeof app.project.on === 'function' && typeof app.project.off === 'function'
+    if (canListen) {
+        app.project.on('projectCreated', onLoad)
+        app.project.on('projectLoaded', onLoad)
+    }
     try {
-        app.commands.execute('project:new')
-        return {
-            success: true,
-            message: 'Created new project',
-            request: reqInfo
-        }
+        app.commands.execute(commandId)
     } catch (e) {
         return {
             success: false,
-            error: 'Failed to create new project: ' + (e.message || String(e)),
+            error: failed + ': ' + (e.message || String(e)),
             request: reqInfo
         }
+    } finally {
+        if (canListen) {
+            app.project.off('projectCreated', onLoad)
+            app.project.off('projectLoaded', onLoad)
+        }
+    }
+    if (!loaded && app.project.getProject() === before) {
+        return {
+            success: false,
+            error: failed + ': the open project was not replaced. ' + (hadChanges
+                ? 'It has unsaved changes, so StarUML is asking in a dialog whether to save them. ' +
+                  'Answer that dialog in StarUML, or save the project first, then call this again.'
+                : 'The command returned without changing the project.'),
+            request: reqInfo,
+            data: { waitingForUser: hadChanges }
+        }
+    }
+    return {
+        success: true,
+        message: done,
+        request: reqInfo
     }
 }
 
+function newProject(reqInfo) {
+    return replaceProject('project:new', 'Created new project', 'Failed to create new project', reqInfo)
+}
+
 function closeProject(reqInfo) {
-    try {
-        app.commands.execute('project:close')
-        return {
-            success: true,
-            message: 'Closed project',
-            request: reqInfo
-        }
-    } catch (e) {
+    // On StarUML 8, project:close closes the last window and the whole
+    // application exits. Measured on 8.1.0 with an unmodified project: the
+    // system log recorded applicationShouldTerminate: YES and "Termination
+    // complete" at the moment of the call, and the user had not quit it.
+    // A caller asking to close the project does not mean to quit StarUML.
+    if (parseInt(String(app.version || ''), 10) >= 8) {
         return {
             success: false,
-            error: 'Failed to close project: ' + (e.message || String(e)),
+            error: 'Refused: on StarUML 8, project:close quits the whole application. ' +
+                'To start over, use POST /api/project/new instead.',
             request: reqInfo
         }
     }
+    return replaceProject('project:close', 'Closed project', 'Failed to close project', reqInfo)
 }
 
 const FRAGMENT_EXPORT_ALLOWED_FIELDS = ['elementId', 'path']
