@@ -35,6 +35,28 @@ check() {
     fi
 }
 
+# For a call the server is supposed to refuse. Passes when it says no AND the
+# reason matches, so a refusal for some other cause still shows up as a failure.
+#
+# check() above reads `success` and nothing else, which means a route that
+# reports a success it never made scores as a pass. Two cases here did exactly
+# that for as long as the controller mistook a null from the model factory for a
+# created element.
+check_refused() {
+    local label="$1"
+    local response="$2"
+    local expect="$3"
+    local success=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',False))" 2>/dev/null)
+    local err=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))" 2>/dev/null)
+    if [ "$success" = "False" ] && echo "$err" | grep -q "$expect"; then
+        PASS=$((PASS+1))
+        TOTAL_RESULTS="${TOTAL_RESULTS}OK   ${label} (refused, as it should be)\n"
+    else
+        FAIL=$((FAIL+1))
+        TOTAL_RESULTS="${TOTAL_RESULTS}FAIL ${label} : expected a refusal matching '${expect}', got success=${success} ${err:0:70}\n"
+    fi
+}
+
 # Extract _id from API response
 getid() { echo "$1" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['_id'])" 2>/dev/null; }
 
@@ -46,9 +68,29 @@ if [ -z "$STATUS" ]; then
     echo "Make sure StarUML is running and the server is started."
     exit 1
 fi
-echo "Connected. Saving project snapshot for restore..."
+echo "Connected. Taking a snapshot of the project for restore..."
 SNAPSHOT="/tmp/test_staruml_snapshot_$$.mdj"
-curl -s -X POST $BASE/api/project/save -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}" > /dev/null
+
+# Remember where the project actually lives, so the restore at the end can
+# reopen that file rather than the copy in /tmp.
+ORIGINAL_PROJECT=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['project']['filename'] or '')" 2>/dev/null)
+
+# Use project/snapshot, not project/save. save is "save as": it repoints the
+# open project at /tmp, so every later save in this session lands there and the
+# real .mdj silently stops receiving changes.
+SNAP_RESULT=$(curl -s -X POST $BASE/api/project/snapshot -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}")
+case "$SNAP_RESULT" in
+    *'"success": true'*) : ;;
+    *'Not found'*)
+        echo "ERROR: this build has no POST /api/project/snapshot, so the pre-test"
+        echo "       snapshot cannot be taken without repointing your project at /tmp."
+        echo "       Reload the extension with a build that has the endpoint."
+        exit 1 ;;
+    *)
+        echo "ERROR: could not snapshot the project for restore:"
+        echo "       $SNAP_RESULT"
+        exit 1 ;;
+esac
 echo "Starting tests..."
 echo ""
 
@@ -513,13 +555,23 @@ R=$(curl -s -X POST $BASE/api/diagrams/$(enc $GD_ACT_DID)/relations -H "Content-
 check "138.gen_create_relation(UMLControlFlow)" "$R"
 
 # Child elements: UMLInputPin / UMLOutputPin on UMLAction (2)
+#
+# Both of these are expected to be REFUSED. StarUML's registerModelFn registers
+# 90 types and not one of them is a Pin, so app.factory.createModel returns null
+# for these two and always has. UMLAction does carry `inputs` and `outputs`
+# arrays, so the request gets past the container check and dies at the factory.
+#
+# Until 2026-09-05 the controller reported that null as a success and handed back
+# an element the repository had never registered, and these two lines scored as
+# passes on it. They are the reason 428/0 became 426/2 on the first live run of
+# the gap-report fixes: the score changed, the behaviour got more honest.
 R=$(curl -s -X POST $BASE/api/elements/$(enc $GD_ACTION_MID)/children -H "Content-Type: application/json" \
   -d '{"type":"UMLInputPin","name":"dataIn"}')
-check "138a.gen_create_child(UMLInputPin)" "$R"
+check_refused "138a.gen_create_child(UMLInputPin)" "$R" "created no element"
 
 R=$(curl -s -X POST $BASE/api/elements/$(enc $GD_ACTION_MID)/children -H "Content-Type: application/json" \
   -d '{"type":"UMLOutputPin","name":"dataOut"}')
-check "138b.gen_create_child(UMLOutputPin)" "$R"
+check_refused "138b.gen_create_child(UMLOutputPin)" "$R" "created no element"
 
 # =============================
 # State Machine Diagram: create + pseudostate + state + transition (4)
@@ -1510,11 +1562,20 @@ check "468.ov_delete_diagram" "$(curl -s -X DELETE $BASE/api/overview/diagrams/$
 # Restore project to pre-test state
 # =============================
 echo ""
-echo "Restoring project from snapshot..."
-curl -s -X POST $BASE/api/project/open -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}" > /dev/null
+if [ -n "$ORIGINAL_PROJECT" ]; then
+    echo "Restoring project by reopening $ORIGINAL_PROJECT ..."
+    curl -s -X POST $BASE/api/project/open -H "Content-Type: application/json" -d "{\"path\":\"$ORIGINAL_PROJECT\"}" > /dev/null
+    rm -f "$SNAPSHOT"
+else
+    # No file was open when the run started, so the snapshot is the only copy of
+    # the pre-test model. Open it, and keep it: deleting it would leave the
+    # project pointing at a file that no longer exists.
+    echo "Restoring project from $SNAPSHOT (no project file was open at the start, so this file is kept)..."
+    curl -s -X POST $BASE/api/project/open -H "Content-Type: application/json" -d "{\"path\":\"$SNAPSHOT\"}" > /dev/null
+fi
 
 # Cleanup temp files
-rm -f /tmp/test_export.png /tmp/test_export.svg /tmp/test_export.jpeg /tmp/test_export.pdf /tmp/test_ddl.sql /tmp/test_fragment.mfj /tmp/test_staruml.mdj "$SNAPSHOT"
+rm -f /tmp/test_export.png /tmp/test_export.svg /tmp/test_export.jpeg /tmp/test_export.pdf /tmp/test_ddl.sql /tmp/test_fragment.mfj /tmp/test_staruml.mdj
 rm -rf /tmp/staruml_export_test /tmp/staruml_test_doc
 
 # =============================

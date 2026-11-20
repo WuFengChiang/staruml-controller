@@ -31,7 +31,17 @@ module.exports = {
             children: [
                 { name: 'properties', type: 'SysMLProperty', field: 'properties', createFields: ['name', 'type'] },
                 { name: 'operations', type: 'UMLOperation', field: 'operations', createFields: ['name'] },
-                { name: 'flow-properties', type: 'SysMLFlowProperty', field: 'flowProperties', createFields: ['name'] }
+                {
+                    name: 'flow-properties',
+                    type: 'SysMLFlowProperty',
+                    field: 'flowProperties',
+                    // A flow property's whole point is which way the item flows,
+                    // so let this endpoint set it instead of forcing callers over
+                    // to POST /api/elements/:id/children. Values are
+                    // SysMLFlowDirectionKind; 'return' belongs to UMLParameter and
+                    // is not one of them. Mirrors DIRECTION_DOMAINS in api-handler.js.
+                    createFields: ['name', { name: 'direction', values: ['in', 'out', 'inout'] }]
+                }
             ]
         },
         {
@@ -64,7 +74,10 @@ module.exports = {
             types: ['SysMLPart', 'SysMLReference', 'SysMLValue', 'SysMLPort', 'SysMLConstraintProperty', 'SysMLConstraintParameter'],
             // SysMLReference, SysMLValue, SysMLConstraintProperty, SysMLConstraintParameter
             // all create SysMLProperty as the actual model type (factory ID ≠ model type).
-            modelTypes: ['SysMLPart', 'SysMLPort', 'SysMLProperty'],
+            // SysMLFlowProperty extends SysMLProperty and has no endpoint of its own,
+            // so exact-type listing dropped it: it is in ALLOWED_CHILD_TYPES, meaning
+            // the API can create one and then never list it again.
+            modelTypes: ['SysMLPart', 'SysMLPort', 'SysMLProperty', 'SysMLFlowProperty'],
             // SysMLConstraintParameter's factory function (parameterFn) expects the diagram
             // itself as parent, not diagram._parent. It internally resolves the SysMLBlock
             // from diagram._parent.

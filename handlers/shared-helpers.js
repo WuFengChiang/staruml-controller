@@ -83,7 +83,49 @@ function serializeElement(elem) {
     if (elem.documentation) {
         result.documentation = elem.documentation
     }
+    // A UMLConstraint's canvas label is its specification, and the elements it
+    // constrains are the only machine-readable part of it. Reporting both here
+    // lets a caller read back what it wrote through PUT /api/elements/:id.
+    if (typeof elem.specification === 'string') {
+        result.specification = elem.specification
+    }
+    if (Array.isArray(elem.constrainedElements)) {
+        result.constrainedElementIds = elem.constrainedElements.map(function (c) { return c._id })
+        result.constrainedElementNames = elem.constrainedElements.map(function (c) { return c.name || '' })
+    }
     return result
+}
+
+/**
+ * An operation's (or reception's, or signal's) parameter list, typed.
+ *
+ * Three call sites used to serialize an operation without this: the generic
+ * `GET /api/elements/:id`, the family child listing behind
+ * `class_list_class_operations`, and UMLClass's own detail serializer. None of
+ * them exposed a parameter's type, so a caller who only had an operation id —
+ * not its parent class — had no way to read the parameter types back; the only
+ * workaround was reading a sequence-diagram message that happened to reference
+ * the operation's signature.
+ */
+function serializeParameters(elem) {
+    if (!Array.isArray(elem.parameters)) {
+        return undefined
+    }
+    return elem.parameters.map(function (p) {
+        const out = { _id: p._id, name: p.name || '', type: '', direction: p.direction || '' }
+        if (p.type && typeof p.type === 'object') {
+            out.type = p.type.name || ''
+            out.typeId = p.type._id
+            out.typeName = p.type.name || ''
+        } else if (p.type) {
+            out.type = p.type
+            out.typeName = p.type
+        }
+        if (typeof p.multiplicity === 'string' && p.multiplicity !== '') {
+            out.multiplicity = p.multiplicity
+        }
+        return out
+    })
 }
 
 function serializeGenericDiagram(diagram) {
@@ -111,6 +153,35 @@ function serializeGenericDiagramDetail(diagram) {
     }
 }
 
+/**
+ * A StarUML Points collection as a plain array of {x, y}.
+ *
+ * Points exposes count()/getPoint(), and its internal array is `points`. Both
+ * are read here because the offline mock builds one and the engine builds the
+ * other. Returns null for anything that is not a points collection, so callers
+ * can tell "no route" from "an empty route".
+ */
+function pointsToArray(points) {
+    if (!points) {
+        return null
+    }
+    let raw = null
+    if (typeof points.count === 'function' && typeof points.getPoint === 'function') {
+        raw = []
+        for (let i = 0, n = points.count(); i < n; i++) {
+            raw.push(points.getPoint(i))
+        }
+    } else if (Array.isArray(points.points)) {
+        raw = points.points
+    }
+    if (!raw) {
+        return null
+    }
+    return raw.map(function (p) {
+        return { x: p.x, y: p.y }
+    })
+}
+
 function serializeViewInfo(view) {
     if (!view) {
         return null
@@ -121,6 +192,18 @@ function serializeViewInfo(view) {
     }
     if (view.model) {
         result.modelId = view.model._id
+    }
+    // An edge is drawn from its points, not from left/top, and its line style
+    // decides how those points are recomputed on the next arrange. A caller that
+    // cannot read either one cannot tell what a write to them actually did.
+    if (view.lineStyle !== undefined) {
+        result.lineStyle = view.lineStyle
+    }
+    if (view.points) {
+        const pts = pointsToArray(view.points)
+        if (pts) {
+            result.points = pts
+        }
     }
     if (view.left !== undefined) {
         result.left = view.left
@@ -134,7 +217,131 @@ function serializeViewInfo(view) {
     if (view.height !== undefined) {
         result.height = view.height
     }
+    // Parasitic views (edge labels) are positioned by angle and offset, not left/top.
+    // Report them so callers can read back what a write actually produced.
+    if (view.alpha !== undefined) {
+        result.alpha = view.alpha
+    }
+    if (view.distance !== undefined) {
+        result.distance = view.distance
+    }
+    if (view.edgePosition !== undefined) {
+        result.edgePosition = view.edgePosition
+    }
+    if (view.hostEdge) {
+        result.hostEdgeId = view.hostEdge._id
+    }
     return result
+}
+
+// ============================================================
+// Write Reporting Helpers
+// ============================================================
+
+// StarUML accepts a write, then silently clamps or discards it: minimum content
+// sizes, parasitic view geometry, read-only derived properties. The API used to
+// report every write as "Updated", so a caller that only reads success/message
+// could not tell an applied write from a discarded one. These helpers compare
+// the value before and after the write and report the difference.
+
+// Coordinates in this codebase carry values like 153.40380859375, so numbers
+// need a tolerance. Keep it small: a write of 431 that comes back as 430
+// (grid snapping) is a clamp the caller must be told about.
+const WRITE_EPSILON = 1e-6
+
+function writeValuesEqual(a, b) {
+    if (typeof a === 'number' && typeof b === 'number') {
+        return Math.abs(a - b) < WRITE_EPSILON
+    }
+    return a === b
+}
+
+function createWriteReport() {
+    return { updated: [], clamped: [], ignored: [] }
+}
+
+/**
+ * Set a property, then verify the engine kept the requested value.
+ * Classifies the write as updated, clamped (kept something else) or
+ * ignored (kept the previous value). Returns the report for chaining.
+ */
+function applyProperty(report, target, prop, requested, fieldName) {
+    const name = fieldName || prop
+    const before = target[prop]
+    app.engine.setProperty(target, prop, requested)
+    const after = target[prop]
+
+    if (writeValuesEqual(after, requested)) {
+        report.updated.push(name)
+    } else if (writeValuesEqual(after, before)) {
+        report.ignored.push({ field: name, requested: requested, actual: after })
+    } else {
+        report.clamped.push({ field: name, requested: requested, actual: after })
+    }
+    return report
+}
+
+/**
+ * Record a write the handler chose not to attempt, with the reason.
+ * Used where the engine would accept the value and then discard it, so the
+ * caller learns why instead of reading a success message for a lost write.
+ */
+function reportIgnoredWrite(report, field, requested, actual, reason) {
+    report.ignored.push({ field: field, requested: requested, actual: actual, reason: reason })
+    return report
+}
+
+function describeRejectedWrites(list) {
+    return list.map(function (r) {
+        const detail = r.field + ' (requested ' + r.requested + ', actual ' + r.actual + ')'
+        return r.reason ? detail + ' [' + r.reason + ']' : detail
+    }).join(', ')
+}
+
+/**
+ * Build the response message. Names the fields that were not stored as asked,
+ * so a caller reading only `message` still learns the write was not honoured.
+ */
+function writeReportMessage(prefix, report) {
+    const parts = []
+    parts.push(prefix + ' (fields: ' + (report.updated.length > 0 ? report.updated.join(', ') : 'none') + ')')
+    if (report.clamped.length > 0) {
+        parts.push('CLAMPED: ' + describeRejectedWrites(report.clamped))
+    }
+    if (report.ignored.length > 0) {
+        parts.push('IGNORED: ' + describeRejectedWrites(report.ignored))
+    }
+    return parts.join(' — ')
+}
+
+/**
+ * Append warnings to a message that already says what it did.
+ * Create handlers use this: their message names the new element rather than a
+ * field list, so it should stay as it is unless a write was refused.
+ */
+function appendWriteWarnings(message, report) {
+    const parts = [message]
+    if (report.clamped.length > 0) {
+        parts.push('CLAMPED: ' + describeRejectedWrites(report.clamped))
+    }
+    if (report.ignored.length > 0) {
+        parts.push('IGNORED: ' + describeRejectedWrites(report.ignored))
+    }
+    return parts.join(' — ')
+}
+
+/**
+ * Merge the report into a response object. `clamped` and `ignored` appear only
+ * when non-empty, so an existing caller sees an unchanged response on a clean write.
+ */
+function attachWriteReport(response, report) {
+    if (report.clamped.length > 0) {
+        response.clamped = report.clamped
+    }
+    if (report.ignored.length > 0) {
+        response.ignored = report.ignored
+    }
+    return response
 }
 
 // ============================================================
@@ -474,6 +681,88 @@ function clearEdgeWaypoints(edgeView) {
 }
 
 // ============================================================
+// Drawing
+// ============================================================
+
+// Several things only happen when StarUML draws a diagram, and a draw does not
+// happen on its own after an API write:
+//
+//   - a parasitic view's left/top are recomputed from alpha/distance
+//   - UMLSequenceDiagram.drawDiagram() calls regulateSequenceNumber() on every
+//     message view, which re-sorts interaction.messages by their y positions
+//
+// Whatever is in memory at save time is what lands in the .mdj, so a write that
+// changes either of those has to draw before it answers.
+
+function diagramOfView(view) {
+    if (!view) {
+        return null
+    }
+    if (typeof view.getDiagram === 'function') {
+        const d = view.getDiagram()
+        if (d) {
+            return d
+        }
+    }
+    let node = view
+    while (node) {
+        if (node.ownedViews) {
+            return node
+        }
+        node = node._parent
+    }
+    return null
+}
+
+/**
+ * The editor whose canvas will arrange `diagram`.
+ *
+ * The main editor only draws the diagram the user has open, so anything on
+ * another diagram would never be re-arranged. StarUML keeps a hidden editor for
+ * exactly this, and its own diagram-layout extension points that editor at a
+ * diagram and repaints before laying out. The main editor is never re-pointed —
+ * that would change what the user is looking at.
+ */
+function editorForDiagram(diagram) {
+    const main = app.diagrams && typeof app.diagrams.getEditor === 'function' ? app.diagrams.getEditor() : null
+    if (main && main.diagram === diagram) {
+        return main
+    }
+    const hidden = app.diagrams && typeof app.diagrams.getHiddenEditor === 'function' ? app.diagrams.getHiddenEditor() : null
+    if (hidden) {
+        hidden.diagram = diagram
+        // StarUML's layout extension repaints twice after re-pointing the hidden
+        // editor; the first pass settles view sizes, which the parasitic anchor
+        // geometry depends on.
+        if (typeof hidden.repaint === 'function') {
+            hidden.repaint()
+            hidden.repaint()
+        }
+        return hidden
+    }
+    return main
+}
+
+/**
+ * Draw `diagram` once. Best effort: returns true when a draw happened.
+ */
+function arrangeDiagram(diagram) {
+    if (!diagram) {
+        return false
+    }
+    try {
+        const editor = editorForDiagram(diagram)
+        if (editor && typeof editor.repaint === 'function') {
+            editor.repaint()
+            return true
+        }
+    } catch (e) {
+        // A draw is a convenience here, never the point of the request.
+    }
+    return false
+}
+
+// ============================================================
 // Exports
 // ============================================================
 
@@ -486,9 +775,19 @@ module.exports = {
     validationError: validationError,
     // Serialization
     serializeElement: serializeElement,
+    serializeParameters: serializeParameters,
     serializeGenericDiagram: serializeGenericDiagram,
     serializeGenericDiagramDetail: serializeGenericDiagramDetail,
     serializeViewInfo: serializeViewInfo,
+    pointsToArray: pointsToArray,
+    // Write reporting
+    createWriteReport: createWriteReport,
+    applyProperty: applyProperty,
+    reportIgnoredWrite: reportIgnoredWrite,
+    writeReportMessage: writeReportMessage,
+    appendWriteWarnings: appendWriteWarnings,
+    attachWriteReport: attachWriteReport,
+    writeValuesEqual: writeValuesEqual,
     // Lookup
     findById: findById,
     findViewOnDiagram: findViewOnDiagram,
@@ -498,5 +797,9 @@ module.exports = {
     autoExpandFrame: autoExpandFrame,
     fitFrameToViews: fitFrameToViews,
     // Edge routing
-    clearEdgeWaypoints: clearEdgeWaypoints
+    clearEdgeWaypoints: clearEdgeWaypoints,
+    // Drawing
+    diagramOfView: diagramOfView,
+    editorForDiagram: editorForDiagram,
+    arrangeDiagram: arrangeDiagram
 }

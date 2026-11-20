@@ -59,7 +59,28 @@ function isAutoContainer(elem) {
  */
 function parseFieldEntry(f) {
     if (typeof f === 'string') return { param: f, prop: f }
-    return { param: f.param, prop: f.prop || f.param }
+    return { param: f.param, prop: f.prop || f.param, values: f.values }
+}
+
+/**
+ * Check fields declared with a `values` whitelist.
+ * Accepts both field-definition shapes: parseFieldEntry's { param, prop, values }
+ * and resolveFieldDef's { name, type, prop, values }.
+ *
+ * Runs before anything is created or written, so a rejected value leaves no
+ * half-configured element behind. Returns an error string, or null when clean.
+ */
+function checkFieldValues(body, defs) {
+    for (let i = 0; i < defs.length; i++) {
+        const d = defs[i]
+        if (!d.values) continue
+        const param = d.param !== undefined ? d.param : d.name
+        const given = body[param]
+        if (given !== undefined && d.values.indexOf(given) === -1) {
+            return 'Invalid ' + param + ' "' + given + '". Allowed: ' + d.values.join(', ')
+        }
+    }
+    return null
 }
 
 /**
@@ -101,6 +122,9 @@ function defaultSerializeNode(elem) {
         _type: elem.constructor.name,
         name: elem.name || ''
     }
+    if (elem.stereotype) {
+        result.stereotype = elem.stereotype
+    }
     if (elem.documentation) {
         result.documentation = elem.documentation
     }
@@ -119,6 +143,9 @@ function defaultSerializeRelation(elem, config) {
         _id: elem._id,
         _type: elem.constructor.name,
         name: elem.name || ''
+    }
+    if (elem.stereotype) {
+        result.stereotype = elem.stereotype
     }
     if (elem.documentation) {
         result.documentation = elem.documentation
@@ -148,11 +175,15 @@ function defaultSerializeRelation(elem, config) {
 
 function serializeEnd(end, endFields) {
     if (!end) return null
-    const result = {}
+    // The end's own id: PUT /api/elements/:id accepts an association end, but
+    // no endpoint used to hand out its id, so callers had to parse the .mdj to
+    // find one. `reference` below is a different thing — the classifier this
+    // end attaches to.
+    const result = { _id: end._id, _type: end.constructor.name }
     if (end.reference) {
         result.reference = end.reference._id
     }
-    const fields = endFields || ['name', 'navigable', 'aggregation', 'multiplicity']
+    const fields = endFields || DEFAULT_END_FIELDS
     fields.forEach(function (f) {
         if (end[f] !== undefined) {
             result[f] = end[f]
@@ -177,9 +208,24 @@ function defaultSerializeChild(elem) {
     if (elem._parent) {
         result._parentId = elem._parent._id
     }
-    // Include common child-specific fields if present
-    if (elem.type !== undefined && typeof elem.type === 'string') {
-        result.type = elem.type
+    // Include common child-specific fields if present.
+    // `type` holds either a plain string or a Model reference; only the string
+    // form used to be reported, so a type set by element id read back as absent.
+    if (elem.type !== undefined && elem.type !== null && elem.type !== '') {
+        if (typeof elem.type === 'string') {
+            result.type = elem.type
+            result.typeName = elem.type
+        } else if (typeof elem.type === 'object') {
+            result.typeId = elem.type._id
+            result.typeName = elem.type.name || ''
+        }
+    }
+    // An operation's return type is the parameter whose direction is 'return'.
+    if (elem.direction !== undefined) {
+        result.direction = elem.direction
+    }
+    if (typeof elem.multiplicity === 'string' && elem.multiplicity !== '') {
+        result.multiplicity = elem.multiplicity
     }
     if (elem.defaultValue !== undefined) {
         result.defaultValue = elem.defaultValue
@@ -190,7 +236,103 @@ function defaultSerializeChild(elem) {
     if (elem.isStatic !== undefined) {
         result.isStatic = elem.isStatic
     }
+    const parameters = h.serializeParameters(elem)
+    if (parameters !== undefined) {
+        result.parameters = parameters
+    }
     return result
+}
+
+// ============================================================
+// Body field sets
+// ============================================================
+
+// Which body fields each generated write accepts, worked out from the family
+// config. The handler factories below validate against these, and
+// createFamilyHandlers puts the same answer on every route it builds, so
+// GET /api/status/capabilities can publish what a build takes without anyone
+// keeping a second list in step with this one.
+//
+// A caller that reads the field list from somewhere other than the code that
+// enforces it ends up proving something narrower than it thinks: that the list
+// it read does not have the field, not that no route accepts it.
+
+function diagramCreateFields(config) {
+    const fields = ['name', 'parentId']
+    // A family that draws more than one kind of diagram has to be told which.
+    if (config.diagrams.types.length > 1) {
+        fields.push('type')
+    }
+    return fields
+}
+
+const DIAGRAM_UPDATE_FIELDS_FAMILY = ['name']
+
+function resourceCreateFields(res) {
+    const fields = ['diagramId', 'name', 'stereotype', 'x1', 'y1', 'x2', 'y2', 'tailViewId', 'lineColor', 'fillColor', 'fontColor']
+    if (res.types.length > 1) {
+        fields.push('type')
+    }
+    if (res.createFields) {
+        res.createFields.forEach(function (f) {
+            const entry = parseFieldEntry(f)
+            if (fields.indexOf(entry.param) === -1) fields.push(entry.param)
+        })
+    }
+    return fields
+}
+
+function resourceUpdateFields(res) {
+    const updateFields = res.updateFields || ['name', 'stereotype', 'documentation']
+    return updateFields.map(resolveFieldDef).map(function (d) { return d.name })
+}
+
+function childCreateFields(child) {
+    const fields = ['name', 'diagramId']
+    if (child.createFields) {
+        child.createFields.forEach(function (f) {
+            const entry = parseFieldEntry(f)
+            if (fields.indexOf(entry.param) === -1) fields.push(entry.param)
+        })
+    }
+    return fields
+}
+
+function childUpdateFields(child) {
+    const updateFields = child.updateFields || ['name', 'documentation']
+    return updateFields.map(resolveFieldDef).map(function (d) { return d.name })
+}
+
+function relationCreateFields(rel) {
+    const fields = ['diagramId', 'sourceId', 'targetId', 'name', 'x1', 'y1', 'x2', 'y2', 'lineColor', 'fillColor', 'fontColor']
+    if (rel.hasEnds) {
+        fields.push('end1')
+        fields.push('end2')
+    }
+    if (rel.createFields) {
+        rel.createFields.forEach(function (f) {
+            const entry = parseFieldEntry(f)
+            if (fields.indexOf(entry.param) === -1) fields.push(entry.param)
+        })
+    }
+    return fields
+}
+
+// What end1/end2 take on this relation's create and update, or undefined when
+// the relation has no ends.
+function relationEndFields(rel) {
+    if (!rel.hasEnds) return undefined
+    return (rel.endFields || DEFAULT_END_FIELDS).concat(END_REFERENCE_FIELDS)
+}
+
+function relationUpdateFields(rel) {
+    const updateFields = rel.updateFields || ['name', 'documentation']
+    const fields = updateFields.map(resolveFieldDef).map(function (d) { return d.name })
+    if (rel.hasEnds) {
+        if (fields.indexOf('end1') === -1) fields.push('end1')
+        if (fields.indexOf('end2') === -1) fields.push('end2')
+    }
+    return fields
 }
 
 // ============================================================
@@ -199,7 +341,8 @@ function defaultSerializeChild(elem) {
 
 /**
  * Build all route handlers for a family config.
- * Returns an array of { method, pattern, handler } objects.
+ * Returns an array of { method, pattern, handler } objects. A route that takes
+ * a body also carries `allowedFields`.
  */
 function createFamilyHandlers(config) {
     const routes = []
@@ -215,7 +358,8 @@ function createFamilyHandlers(config) {
         routes.push({
             method: 'POST',
             pattern: prefix + '/diagrams',
-            handler: makeCreateDiagram(config)
+            handler: makeCreateDiagram(config),
+            allowedFields: diagramCreateFields(config)
         })
         routes.push({
             method: 'GET',
@@ -225,7 +369,8 @@ function createFamilyHandlers(config) {
         routes.push({
             method: 'PUT',
             pattern: prefix + '/diagrams/:id',
-            handler: makeUpdateDiagram(config)
+            handler: makeUpdateDiagram(config),
+            allowedFields: DIAGRAM_UPDATE_FIELDS_FAMILY
         })
         routes.push({
             method: 'DELETE',
@@ -245,7 +390,8 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'POST',
                 pattern: prefix + '/' + res.name,
-                handler: makeCreateResource(config, res)
+                handler: makeCreateResource(config, res),
+                allowedFields: resourceCreateFields(res)
             })
             routes.push({
                 method: 'GET',
@@ -255,7 +401,8 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'PUT',
                 pattern: prefix + '/' + res.name + '/:id',
-                handler: makeUpdateResource(config, res)
+                handler: makeUpdateResource(config, res),
+                allowedFields: resourceUpdateFields(res)
             })
             routes.push({
                 method: 'DELETE',
@@ -274,8 +421,17 @@ function createFamilyHandlers(config) {
                     routes.push({
                         method: 'POST',
                         pattern: prefix + '/' + res.name + '/:id/' + child.name,
-                        handler: makeCreateChild(config, res, child)
+                        handler: makeCreateChild(config, res, child),
+                        allowedFields: childCreateFields(child)
                     })
+                    if (child.updateFields) {
+                        routes.push({
+                            method: 'PUT',
+                            pattern: prefix + '/' + res.name + '/:id/' + child.name + '/:childId',
+                            handler: makeUpdateChild(config, res, child),
+                            allowedFields: childUpdateFields(child)
+                        })
+                    }
                 })
             }
         })
@@ -292,7 +448,9 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'POST',
                 pattern: prefix + '/' + rel.name,
-                handler: makeCreateRelation(config, rel)
+                handler: makeCreateRelation(config, rel),
+                allowedFields: relationCreateFields(rel),
+                allowedEndFields: relationEndFields(rel)
             })
             routes.push({
                 method: 'GET',
@@ -302,13 +460,43 @@ function createFamilyHandlers(config) {
             routes.push({
                 method: 'PUT',
                 pattern: prefix + '/' + rel.name + '/:id',
-                handler: makeUpdateRelation(config, rel)
+                handler: makeUpdateRelation(config, rel),
+                allowedFields: relationUpdateFields(rel),
+                allowedEndFields: relationEndFields(rel)
             })
             routes.push({
                 method: 'DELETE',
                 pattern: prefix + '/' + rel.name + '/:id',
                 handler: makeDeleteRelation(config, rel)
             })
+
+            // Child routes on relations (e.g., triggers under a transition).
+            // makeListChildren/makeCreateChild only read `name` and `types` off the
+            // parent config, so a resource-shaped view of the relation reuses them as-is.
+            if (rel.children) {
+                const relAsResource = { name: rel.name, types: relationTypes(rel) }
+                rel.children.forEach(function (child) {
+                    routes.push({
+                        method: 'GET',
+                        pattern: prefix + '/' + rel.name + '/:id/' + child.name,
+                        handler: makeListChildren(config, relAsResource, child)
+                    })
+                    routes.push({
+                        method: 'POST',
+                        pattern: prefix + '/' + rel.name + '/:id/' + child.name,
+                        handler: makeCreateChild(config, relAsResource, child),
+                        allowedFields: childCreateFields(child)
+                    })
+                    if (child.updateFields) {
+                        routes.push({
+                            method: 'PUT',
+                            pattern: prefix + '/' + rel.name + '/:id/' + child.name + '/:childId',
+                            handler: makeUpdateChild(config, relAsResource, child),
+                            allowedFields: childUpdateFields(child)
+                        })
+                    }
+                })
+            }
         })
     }
 
@@ -336,11 +524,7 @@ function makeListDiagrams(config) {
 }
 
 function makeCreateDiagram(config) {
-    const allowedFields = ['name', 'parentId']
-    // If multiple diagram types, allow 'type' field
-    if (config.diagrams.types.length > 1) {
-        allowedFields.push('type')
-    }
+    const allowedFields = diagramCreateFields(config)
     return function (params, query, body, reqInfo) {
         const err = h.validate([
             h.checkUnknownFields(body, allowedFields),
@@ -428,7 +612,7 @@ function makeGetDiagram(config) {
 function makeUpdateDiagram(config) {
     return function (params, query, body, reqInfo) {
         const err = h.validate([
-            h.checkUnknownFields(body, ['name']),
+            h.checkUnknownFields(body, DIAGRAM_UPDATE_FIELDS_FAMILY),
             h.checkFieldType(body, 'name', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
@@ -447,16 +631,17 @@ function makeUpdateDiagram(config) {
             return { success: false, error: 'Diagram not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
+        const report = h.createWriteReport()
         if (body.name !== undefined) {
-            app.engine.setProperty(diagram, 'name', body.name)
+            h.applyProperty(report, diagram, 'name', body.name)
         }
 
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated diagram "' + diagram.name + '"',
+            message: h.writeReportMessage('Updated diagram "' + diagram.name + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: h.serializeGenericDiagramDetail(diagram)
-        }
+        }, report)
     }
 }
 
@@ -527,6 +712,15 @@ function makeListResource(config, res) {
         listTypes.forEach(function (t) {
             const found = app.repository.select('@' + t)
             found.forEach(function (e) {
+                // select('@Type') matches the whole inheritance chain, so it also hands
+                // back subtypes: @UMLComponent returns UMLSubsystem and UMLUseCaseSubject,
+                // @UMLClass returns UMLStereotype, @UMLDataType returns UMLEnumeration.
+                // makeGetResource/makeUpdateResource/makeDeleteResource already match on
+                // constructor.name against this same list, so listing stayed the odd one
+                // out. Drop anything whose exact type was not asked for.
+                if (listTypes.indexOf(e.constructor.name) === -1) {
+                    return
+                }
                 if (!seenIds[e._id]) {
                     seenIds[e._id] = true
                     elements.push(e)
@@ -562,18 +756,7 @@ function makeListResource(config, res) {
 }
 
 function makeCreateResource(config, res) {
-    const allowedFields = ['diagramId', 'name', 'x1', 'y1', 'x2', 'y2', 'tailViewId', 'lineColor', 'fillColor', 'fontColor']
-    // If multiple types, allow 'type' field
-    if (res.types.length > 1) {
-        allowedFields.push('type')
-    }
-    // Add extra create fields from config
-    if (res.createFields) {
-        res.createFields.forEach(function (f) {
-            const entry = parseFieldEntry(f)
-            if (allowedFields.indexOf(entry.param) === -1) allowedFields.push(entry.param)
-        })
-    }
+    const allowedFields = resourceCreateFields(res)
 
     return function (params, query, body, reqInfo) {
         const checks = [
@@ -647,10 +830,15 @@ function makeCreateResource(config, res) {
             }
         }
 
+        // x2/y2 default to a size measured from x1/y1, not to fixed coordinates.
+        // Absolute defaults inverted the rectangle whenever x1/y1 exceeded them:
+        // x1=680,y1=420 with no x2/y2 gave (680,420)-(200,180), which StarUML
+        // normalises to left=200,top=180 — so every element placed past (200,180)
+        // silently stacked in the same spot.
         const x1 = body.x1 !== undefined ? body.x1 : 100
         const y1 = body.y1 !== undefined ? body.y1 : 100
-        const x2 = body.x2 !== undefined ? body.x2 : 200
-        const y2 = body.y2 !== undefined ? body.y2 : 180
+        const x2 = body.x2 !== undefined ? body.x2 : x1 + 100
+        const y2 = body.y2 !== undefined ? body.y2 : y1 + 80
 
         const factoryOpts = {
             id: factoryId,
@@ -707,11 +895,18 @@ function makeCreateResource(config, res) {
             const view = app.factory.createModelAndView(factoryOpts)
             const model = view.model || view
 
-            if (body.name && model && typeof model._id === 'string') {
-                app.engine.setProperty(model, 'name', body.name)
+            const report = h.createWriteReport()
+            const hasModel = model && typeof model._id === 'string'
+
+            if (body.name && hasModel) {
+                h.applyProperty(report, model, 'name', body.name)
                 // Propagate name to child UMLInteraction (used by Interaction Overview Diagram).
                 // StarUML creates UMLAction + child UMLInteraction; the view displays the child's name.
                 propagateNameToChildInteraction(model, body.name)
+            }
+
+            if (body.stereotype !== undefined && hasModel) {
+                h.applyProperty(report, model, 'stereotype', body.stereotype)
             }
 
             // Apply extra fields via setProperty
@@ -719,8 +914,13 @@ function makeCreateResource(config, res) {
                 res.createFields.forEach(function (f) {
                     const entry = parseFieldEntry(f)
                     if (body[entry.param] !== undefined && entry.param !== 'name' && entry.param !== 'diagramId' && entry.param !== 'type' && entry.param !== 'tailViewId') {
-                        if (model && typeof model._id === 'string') {
-                            app.engine.setProperty(model, entry.prop, body[entry.param])
+                        if (hasModel) {
+                            h.applyProperty(report, model, entry.prop, body[entry.param], entry.param)
+                        } else {
+                            // These used to be dropped without a word when the
+                            // factory returned a view with no model element.
+                            h.reportIgnoredWrite(report, entry.param, body[entry.param], undefined,
+                                'the created ' + elemType + ' has no model element to store it on')
                         }
                     }
                 })
@@ -730,7 +930,7 @@ function makeCreateResource(config, res) {
             const styleProps = ['lineColor', 'fillColor', 'fontColor']
             styleProps.forEach(function (prop) {
                 if (body[prop] !== undefined) {
-                    app.engine.setProperty(view, prop, body[prop])
+                    h.applyProperty(report, view, prop, body[prop])
                 }
             })
 
@@ -738,12 +938,12 @@ function makeCreateResource(config, res) {
             h.autoExpandFrame(diagram)
 
             const serializer = res.serialize || defaultSerializeNode
-            return {
+            return h.attachWriteReport({
                 success: true,
-                message: 'Created ' + res.name.replace(/-/g, ' ') + ' "' + (model ? model.name || elemType : elemType) + '"',
+                message: h.appendWriteWarnings('Created ' + res.name.replace(/-/g, ' ') + ' "' + (model ? model.name || elemType : elemType) + '"', report),
                 request: Object.assign({}, reqInfo, { body: body }),
                 data: serializer(model)
-            }
+            }, report)
         } catch (e) {
             return { success: false, error: 'Failed to create element: ' + (e.message || String(e)), request: Object.assign({}, reqInfo, { body: body }) }
         }
@@ -773,13 +973,13 @@ function makeGetResource(config, res) {
 
 function resolveFieldDef(f) {
     if (typeof f === 'string') return { name: f, type: 'string', prop: f }
-    return { name: f.name, type: f.type || 'string', prop: f.prop || f.name }
+    return { name: f.name, type: f.type || 'string', prop: f.prop || f.name, values: f.values }
 }
 
 function makeUpdateResource(config, res) {
-    const updateFields = res.updateFields || ['name', 'documentation']
+    const updateFields = res.updateFields || ['name', 'stereotype', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
-    const fieldNames = fieldDefs.map(function (d) { return d.name })
+    const fieldNames = resourceUpdateFields(res)
     const checkTypes = res.modelTypes || res.types
     return function (params, query, body, reqInfo) {
         const checks = [h.checkUnknownFields(body, fieldNames)]
@@ -806,11 +1006,10 @@ function makeUpdateResource(config, res) {
             return { success: false, error: res.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
-        const updated = []
+        const report = h.createWriteReport()
         fieldDefs.forEach(function (d) {
             if (body[d.name] !== undefined) {
-                app.engine.setProperty(elem, d.prop, body[d.name])
-                updated.push(d.name)
+                h.applyProperty(report, elem, d.prop, body[d.name], d.name)
                 // Propagate name to child UMLInteraction (used by Interaction Overview Diagram)
                 if (d.prop === 'name') {
                     propagateNameToChildInteraction(elem, body[d.name])
@@ -819,12 +1018,12 @@ function makeUpdateResource(config, res) {
         })
 
         const serializer = res.serialize || defaultSerializeNode
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated ' + res.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '" (fields: ' + updated.join(', ') + ')',
+            message: h.writeReportMessage('Updated ' + res.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: serializer(elem)
-        }
+        }, report)
     }
 }
 
@@ -891,21 +1090,21 @@ function makeListChildren(config, res, child) {
 }
 
 function makeCreateChild(config, res, child) {
-    const allowedFields = ['name', 'diagramId']
-    if (child.createFields) {
-        child.createFields.forEach(function (f) {
-            const entry = parseFieldEntry(f)
-            if (allowedFields.indexOf(entry.param) === -1) allowedFields.push(entry.param)
-        })
-    }
+    const allowedFields = childCreateFields(child)
 
     return function (params, query, body, reqInfo) {
         const err = h.validate([
             h.checkUnknownFields(body, allowedFields),
             h.checkFieldType(body, 'name', 'string'),
-            h.checkFieldType(body, 'diagramId', 'string')
+            h.checkFieldType(body, 'diagramId', 'string'),
+            h.checkFieldType(body, 'multiplicity', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
+
+        if (child.createFields) {
+            const valErr = checkFieldValues(body, child.createFields.map(parseFieldEntry))
+            if (valErr) return h.validationError(valErr, reqInfo, body)
+        }
 
         const parent = h.findById(params.id)
         if (!parent) {
@@ -991,8 +1190,9 @@ function makeCreateChild(config, res, child) {
                 model = view.model || view
             }
 
+            const report = h.createWriteReport()
             if (body.name && model) {
-                app.engine.setProperty(model, 'name', body.name)
+                h.applyProperty(report, model, 'name', body.name)
             }
 
             // Apply extra fields
@@ -1000,21 +1200,80 @@ function makeCreateChild(config, res, child) {
                 child.createFields.forEach(function (f) {
                     const entry = parseFieldEntry(f)
                     if (body[entry.param] !== undefined && entry.param !== 'name') {
-                        app.engine.setProperty(model, entry.prop, body[entry.param])
+                        h.applyProperty(report, model, entry.prop, body[entry.param], entry.param)
                     }
                 })
             }
 
             const serializer = child.serialize || defaultSerializeChild
-            return {
+            return h.attachWriteReport({
                 success: true,
-                message: 'Created ' + child.name.replace(/-/g, ' ') + ' "' + (model.name || child.type) + '"',
+                message: h.appendWriteWarnings('Created ' + child.name.replace(/-/g, ' ') + ' "' + (model.name || child.type) + '"', report),
                 request: Object.assign({}, reqInfo, { body: body }),
                 data: serializer(model)
-            }
+            }, report)
         } catch (e) {
             return { success: false, error: 'Failed to create ' + child.name.replace(/-/g, ' ') + ': ' + (e.message || String(e)), request: Object.assign({}, reqInfo, { body: body }) }
         }
+    }
+}
+
+/**
+ * Update one child element in place.
+ *
+ * Only generated when the child config declares `updateFields`. Without this,
+ * a child created with a wrong value can only be deleted and rebuilt, and some
+ * of those values are invisible on the canvas -- a UMLEvent created without a
+ * kind silently becomes 'anyReceive', which means "any event triggers this",
+ * while the label still shows only the event name.
+ */
+function makeUpdateChild(config, res, child) {
+    const updateFields = child.updateFields || ['name', 'documentation']
+    const fieldDefs = updateFields.map(resolveFieldDef)
+    const fieldNames = childUpdateFields(child)
+
+    return function (params, query, body, reqInfo) {
+        const checks = [h.checkUnknownFields(body, fieldNames)]
+        fieldDefs.forEach(function (d) {
+            checks.push(h.checkFieldType(body, d.name, d.type))
+        })
+        const err = h.validate(checks)
+        if (err) return h.validationError(err, reqInfo, body)
+
+        const valErr = checkFieldValues(body, fieldDefs)
+        if (valErr) return h.validationError(valErr, reqInfo, body)
+
+        if (Object.keys(body).length === 0) {
+            return h.validationError('At least one field must be provided. Allowed fields: ' + fieldNames.join(', '), reqInfo, body)
+        }
+
+        const parent = h.findById(params.id)
+        if (!parent || res.types.indexOf(parent.constructor.name) === -1) {
+            return { success: false, error: res.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
+        }
+
+        const elem = h.findById(params.childId)
+        const siblings = parent[child.field] || []
+        // The child must actually live under this parent. Without this check a
+        // valid id from somewhere else in the model would be edited instead.
+        if (!elem || siblings.indexOf(elem) === -1) {
+            return { success: false, error: child.name.replace(/-/g, ' ') + ' not found under ' + res.name.replace(/-/g, ' ') + ' ' + params.id + ': ' + params.childId, request: Object.assign({}, reqInfo, { body: body }) }
+        }
+
+        const report = h.createWriteReport()
+        fieldDefs.forEach(function (d) {
+            if (body[d.name] !== undefined) {
+                h.applyProperty(report, elem, d.prop, body[d.name], d.name)
+            }
+        })
+
+        const serializer = child.serialize || defaultSerializeChild
+        return h.attachWriteReport({
+            success: true,
+            message: h.writeReportMessage('Updated ' + child.name.replace(/-/g, ' ') + ' "' + (elem.name || params.childId) + '"', report),
+            request: Object.assign({}, reqInfo, { body: body }),
+            data: serializer(elem)
+        }, report)
     }
 }
 
@@ -1022,10 +1281,34 @@ function makeCreateChild(config, res, child) {
 // Relation handlers
 // ============================================================
 
+// The exact types a relation endpoint answers for.
+//
+// `type` is what the endpoint creates. `modelTypes` widens what it will match,
+// for subtypes that have no endpoint of their own: matching on the exact name
+// alone would leave them unreachable, because nothing else lists them. Subtypes
+// that do have their own endpoint (UMLRealization -> class/realizations) are
+// deliberately left out — keeping them out of the parent list is the point.
+function relationTypes(rel) {
+    return rel.modelTypes || [rel.modelType || rel.type]
+}
+
 function makeListRelation(config, rel) {
-    const listType = rel.modelType || rel.type
+    const listTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
-        const elements = app.repository.select('@' + listType)
+        // Same inheritance-chain leak as makeListResource: @UMLDependency also hands
+        // back UMLAbstraction, UMLRealization, UMLInterfaceRealization and
+        // UMLComponentRealization. Match exactly, against every type this endpoint
+        // is responsible for.
+        const seen = {}
+        const elements = []
+        listTypes.forEach(function (t) {
+            app.repository.select('@' + t).forEach(function (e) {
+                if (listTypes.indexOf(e.constructor.name) === -1) return
+                if (seen[e._id]) return
+                seen[e._id] = true
+                elements.push(e)
+            })
+        })
 
         let filtered = elements
         // Filter by diagramId if provided
@@ -1056,18 +1339,7 @@ function makeListRelation(config, rel) {
 }
 
 function makeCreateRelation(config, rel) {
-    const allowedFields = ['diagramId', 'sourceId', 'targetId', 'name', 'x1', 'y1', 'x2', 'y2', 'lineColor', 'fillColor', 'fontColor']
-    // Add end1/end2 fields if applicable
-    if (rel.hasEnds) {
-        allowedFields.push('end1')
-        allowedFields.push('end2')
-    }
-    if (rel.createFields) {
-        rel.createFields.forEach(function (f) {
-            const entry = parseFieldEntry(f)
-            if (allowedFields.indexOf(entry.param) === -1) allowedFields.push(entry.param)
-        })
-    }
+    const allowedFields = relationCreateFields(rel)
 
     return function (params, query, body, reqInfo) {
         const err = h.validate([
@@ -1078,6 +1350,15 @@ function makeCreateRelation(config, rel) {
             h.checkFieldType(body, 'name', 'string')
         ])
         if (err) return h.validationError(err, reqInfo, body)
+
+        if (rel.createFields) {
+            const valErr = checkFieldValues(body, rel.createFields.map(parseFieldEntry))
+            if (valErr) return h.validationError(valErr, reqInfo, body)
+        }
+        if (rel.hasEnds) {
+            const endValErr = checkEndFieldValues(body, rel.endFields)
+            if (endValErr) return h.validationError(endValErr, reqInfo, body)
+        }
 
         if (!body.diagramId) {
             return h.validationError('Field "diagramId" is required', reqInfo, body)
@@ -1139,18 +1420,36 @@ function makeCreateRelation(config, rel) {
             const view = app.factory.createModelAndView(options)
             const model = view.model || view
 
-            if (body.name && model && typeof model._id === 'string') {
-                app.engine.setProperty(model, 'name', body.name)
+            const report = h.createWriteReport()
+            const hasModel = model && typeof model._id === 'string'
+
+            if (body.name && hasModel) {
+                h.applyProperty(report, model, 'name', body.name)
             }
 
             // Apply end1/end2 updates
             if (rel.hasEnds && model) {
-                if (body.end1 && model.end1) {
-                    applyEndFields(model.end1, body.end1, rel.endFields)
-                }
-                if (body.end2 && model.end2) {
-                    applyEndFields(model.end2, body.end2, rel.endFields)
-                }
+                ['end1', 'end2'].forEach(function (endName) {
+                    if (!body[endName]) {
+                        return
+                    }
+                    if (model[endName]) {
+                        const endErr = applyEndFields(model[endName], body[endName], rel.endFields, report, endName, model)
+                        if (endErr) {
+                            h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined, endErr)
+                        }
+                    } else {
+                        h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                            'the created ' + rel.type + ' has no ' + endName)
+                    }
+                })
+            } else if (model) {
+                ['end1', 'end2'].forEach(function (endName) {
+                    if (body[endName] !== undefined) {
+                        h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                            'this relation type has no ends')
+                    }
+                })
             }
 
             // Apply extra fields
@@ -1158,8 +1457,11 @@ function makeCreateRelation(config, rel) {
                 rel.createFields.forEach(function (f) {
                     const entry = parseFieldEntry(f)
                     if (body[entry.param] !== undefined && entry.param !== 'name' && entry.param !== 'diagramId' && entry.param !== 'sourceId' && entry.param !== 'targetId' && entry.param !== 'end1' && entry.param !== 'end2') {
-                        if (model && typeof model._id === 'string') {
-                            app.engine.setProperty(model, entry.prop, body[entry.param])
+                        if (hasModel) {
+                            h.applyProperty(report, model, entry.prop, body[entry.param], entry.param)
+                        } else {
+                            h.reportIgnoredWrite(report, entry.param, body[entry.param], undefined,
+                                'the created ' + rel.type + ' has no model element to store it on')
                         }
                     }
                 })
@@ -1169,7 +1471,7 @@ function makeCreateRelation(config, rel) {
             const styleProps = ['lineColor', 'fillColor', 'fontColor']
             styleProps.forEach(function (prop) {
                 if (body[prop] !== undefined) {
-                    app.engine.setProperty(view, prop, body[prop])
+                    h.applyProperty(report, view, prop, body[prop])
                 }
             })
 
@@ -1177,32 +1479,269 @@ function makeCreateRelation(config, rel) {
             h.autoExpandFrame(diagram)
 
             const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
-            return {
+            return h.attachWriteReport({
                 success: true,
-                message: 'Created ' + rel.name.replace(/-/g, ' ') + ' "' + (model ? model.name || rel.type : rel.type) + '"',
+                message: h.appendWriteWarnings('Created ' + rel.name.replace(/-/g, ' ') + ' "' + (model ? model.name || rel.type : rel.type) + '"', report),
                 request: Object.assign({}, reqInfo, { body: body }),
                 data: relSerializer(model)
-            }
+            }, report)
         } catch (e) {
             return { success: false, error: 'Failed to create relation: ' + (e.message || String(e)), request: Object.assign({}, reqInfo, { body: body }) }
         }
     }
 }
 
-function applyEndFields(end, values, endFields) {
-    const fields = endFields || ['name', 'navigable', 'aggregation', 'multiplicity']
-    fields.forEach(function (f) {
-        if (values[f] !== undefined) {
-            app.engine.setProperty(end, f, values[f])
+// The two spellings of "the classifier this end attaches to". serializeEnd
+// reports it as `reference`, so a caller that reads an association and writes
+// the same shape back must be able to use that name; `referenceId` matches the
+// xxxId convention the rest of the API uses for element references.
+const END_REFERENCE_FIELDS = ['reference', 'referenceId']
+
+const DEFAULT_END_FIELDS = ['name', 'navigable', 'aggregation', 'multiplicity']
+
+// Value rules for the fields a relation end can carry, from UMLRelationshipEnd
+// in StarUML's uml/metamodel.json. `navigable` is a UMLNavigableKind string, not
+// a boolean: the edge view compares it against these literals, so a stored
+// `true` passes a read-back and draws the arrow on the wrong end.
+const NAVIGABLE_KINDS = ['unspecified', 'navigable', 'notNavigable']
+const AGGREGATION_KINDS = ['none', 'shared', 'composite']
+const END_FIELD_RULES = {
+    name: { type: 'string' },
+    multiplicity: { type: 'string' },
+    navigable: { type: 'string', values: NAVIGABLE_KINDS },
+    aggregation: { type: 'string', values: AGGREGATION_KINDS },
+    isDerived: { type: 'boolean' },
+    isReadOnly: { type: 'boolean' },
+    isOrdered: { type: 'boolean' },
+    isUnique: { type: 'boolean' }
+}
+
+// A boolean `navigable` is what callers sent before this was a string.
+function endFieldValue(field, value) {
+    if (field === 'navigable' && typeof value === 'boolean') {
+        return value ? 'navigable' : 'notNavigable'
+    }
+    return value
+}
+
+/**
+ * The first end field in the body whose value the model would not accept.
+ * Runs before anything is written, so one bad value cannot leave the other
+ * fields of the same request half-applied.
+ */
+function checkEndFieldValues(body, endFields) {
+    const fields = endFields || DEFAULT_END_FIELDS
+    const ends = ['end1', 'end2']
+    for (let i = 0; i < ends.length; i++) {
+        const endName = ends[i]
+        const values = body[endName]
+        if (values === undefined || values === null) {
+            continue
         }
+        if (typeof values !== 'object' || Array.isArray(values)) {
+            return 'Field "' + endName + '" must be an object of end fields: ' + fields.concat(END_REFERENCE_FIELDS).join(', ')
+        }
+        for (let j = 0; j < fields.length; j++) {
+            const f = fields[j]
+            const rule = END_FIELD_RULES[f]
+            if (!rule || values[f] === undefined) {
+                continue
+            }
+            const v = endFieldValue(f, values[f])
+            if (typeof v !== rule.type) {
+                return 'Field "' + endName + '.' + f + '" must be a ' + rule.type +
+                    (rule.values ? ' (' + rule.values.join(', ') + ')' : '') + '. Got ' + JSON.stringify(values[f])
+            }
+            if (rule.values && rule.values.indexOf(v) === -1) {
+                return 'Invalid ' + endName + '.' + f + ' "' + v + '". Allowed: ' + rule.values.join(', ')
+            }
+        }
+    }
+    return null
+}
+
+/**
+ * Move one end of a relation to a different element, and move every view of
+ * that relation with it.
+ *
+ * Before this, the only way to change an association's endpoint was to delete
+ * the association and build a new one — which changes its _id and destroys
+ * every view of it, so each diagram had to be re-drawn and re-arranged by hand.
+ *
+ * StarUML's metamodel marks RelationshipEnd.reference `readOnly: true`, but that
+ * flag only hides the field in the property editor: Engine.setProperty does not
+ * check it, and Engine.reconnectEdge — the code behind dragging an endpoint on
+ * the canvas — writes end1.reference / end2.reference exactly this way.
+ *
+ * Returns an error string, or null when the write was attempted (the report
+ * says whether it took).
+ */
+function resolveEndReference(relation, endName, targetId, spelling) {
+    if (targetId === null) {
+        return { error: 'Field "' + endName + '.' + spelling + '" cannot be cleared: a relation end with no reference is not a valid model.' }
+    }
+    if (typeof targetId !== 'string' || targetId.trim() === '') {
+        return { error: 'Field "' + endName + '.' + spelling + '" must be the id of the element this end should attach to.' }
+    }
+    const target = h.findById(targetId)
+    if (!target) {
+        return { error: endName + '.' + spelling + ' not found: ' + targetId }
+    }
+    if (!(target instanceof type.Model)) {
+        return { error: endName + '.' + spelling + ' must refer to a model element. Got ' + target.constructor.name }
+    }
+    // An association between a class and a package is legal in the metamodel
+    // (the declared type is Model) and meaningless in UML.
+    if (relation instanceof type.UMLAssociation && !(target instanceof type.UMLClassifier)) {
+        return { error: endName + '.' + spelling + ' must refer to a UMLClassifier for a ' + relation.constructor.name +
+            ' (class, interface, data type, enumeration, signal, actor, use case, ...). Got ' + target.constructor.name }
+    }
+    return { target: target }
+}
+
+/**
+ * Which end reference spellings a body carries, and the errors they would
+ * cause. Lets a handler reject a bad id before it writes anything.
+ */
+function checkEndReferences(relation, body) {
+    const ends = ['end1', 'end2']
+    for (let i = 0; i < ends.length; i++) {
+        const endName = ends[i]
+        const values = body[endName]
+        if (!values || typeof values !== 'object') {
+            continue
+        }
+        const spelling = END_REFERENCE_FIELDS.filter(function (s) { return values[s] !== undefined })
+        if (spelling.length > 1) {
+            return 'Fields "' + endName + '.reference" and "' + endName + '.referenceId" are two names for the same property. Provide one of them.'
+        }
+        if (spelling.length === 1) {
+            const resolved = resolveEndReference(relation, endName, values[spelling[0]], spelling[0])
+            if (resolved.error) {
+                return resolved.error
+            }
+        }
+    }
+    return null
+}
+
+function applyEndReference(relation, end, endName, targetId, spelling, report) {
+    const resolved = resolveEndReference(relation, endName, targetId, spelling)
+    if (resolved.error) {
+        return resolved.error
+    }
+    h.applyProperty(report, end, 'reference', resolved.target, endName + '.reference')
+    repointRelationViews(relation, endName, resolved.target, report)
+    return null
+}
+
+/**
+ * Point every view of `relation` at the new endpoint.
+ *
+ * A diagram that does not already show the new element cannot be re-pointed —
+ * an edge view needs a node view on the same diagram to attach to. That diagram
+ * is reported as ignored and left drawing the old endpoint, rather than
+ * refusing the whole write: refusing would put the caller back to deleting and
+ * rebuilding the relation, which is the cost this exists to remove.
+ */
+function repointRelationViews(relation, endName, target, report) {
+    const isTail = endName === 'end1'
+    let views = []
+    try {
+        views = app.repository.getViewsOf(relation) || []
+    } catch (e) {
+        views = []
+    }
+    if (views.length === 0) {
+        return
+    }
+    const touchedDiagrams = []
+    views.forEach(function (edgeView) {
+        if (!edgeView || edgeView.tail === undefined || edgeView.head === undefined) {
+            return
+        }
+        const diagram = edgeView._parent
+        const diagramName = diagram ? (diagram.name || diagram._id) : '(unknown diagram)'
+        if (!diagram || !diagram.ownedViews) {
+            h.reportIgnoredWrite(report, endName + '.view[' + diagramName + ']', target.name || target._id, undefined,
+                'this view is not on a diagram')
+            return
+        }
+        const targetView = h.findViewOnDiagram(diagram, target._id)
+        if (!targetView) {
+            h.reportIgnoredWrite(report, endName + '.view[' + diagramName + ']', target.name || target._id, undefined,
+                '"' + (target.name || target._id) + '" has no view on this diagram, so it still draws the old endpoint. ' +
+                'Add a view of the new element to that diagram, then call PUT /api/views/' + edgeView._id + '/reconnect')
+            return
+        }
+        h.applyProperty(report, edgeView, isTail ? 'tail' : 'head', targetView,
+            endName + '.view[' + diagramName + '].' + (isTail ? 'tail' : 'head'))
+        h.clearEdgeWaypoints(edgeView)
+        if (touchedDiagrams.indexOf(diagram) === -1) {
+            touchedDiagrams.push(diagram)
+        }
+    })
+
+    // The edge now runs between different points, and its labels take their
+    // left/top from those points on the next arrange pass. Without a draw here,
+    // the model would be right and the label coordinates in the saved .mdj would
+    // still describe the old route.
+    touchedDiagrams.forEach(function (d) {
+        h.arrangeDiagram(d)
     })
 }
 
+function applyEndFields(end, values, endFields, report, endName, relation) {
+    const fields = endFields || DEFAULT_END_FIELDS
+    fields.forEach(function (f) {
+        if (values[f] !== undefined) {
+            const v = endFieldValue(f, values[f])
+            if (report) {
+                h.applyProperty(report, end, f, v, (endName || 'end') + '.' + f)
+            } else {
+                app.engine.setProperty(end, f, v)
+            }
+        }
+    })
+
+    const spelling = END_REFERENCE_FIELDS.filter(function (s) { return values[s] !== undefined })
+    if (spelling.length > 1) {
+        if (report) {
+            h.reportIgnoredWrite(report, (endName || 'end') + '.reference', spelling.join(' + '), undefined,
+                '"reference" and "referenceId" are two names for the same property; provide one of them')
+        }
+    } else if (spelling.length === 1) {
+        if (!relation) {
+            if (report) {
+                h.reportIgnoredWrite(report, (endName || 'end') + '.' + spelling[0], values[spelling[0]], undefined,
+                    'this handler cannot resolve the relation the end belongs to')
+            }
+        } else {
+            const refErr = applyEndReference(relation, end, endName || 'end', values[spelling[0]], spelling[0], report)
+            if (refErr) {
+                return refErr
+            }
+        }
+    }
+
+    // A field the caller sent that this relation's end does not accept would
+    // otherwise vanish without a word.
+    if (report) {
+        Object.keys(values).forEach(function (f) {
+            if (fields.indexOf(f) === -1 && END_REFERENCE_FIELDS.indexOf(f) === -1) {
+                h.reportIgnoredWrite(report, (endName || 'end') + '.' + f, values[f], undefined,
+                    'not a settable field on this relation end; settable: ' + fields.concat(END_REFERENCE_FIELDS).join(', '))
+            }
+        })
+    }
+    return null
+}
+
 function makeGetRelation(config, rel) {
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: reqInfo }
         }
         const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
@@ -1219,13 +1758,8 @@ function makeUpdateRelation(config, rel) {
     const updateFields = rel.updateFields || ['name', 'documentation']
     const fieldDefs = updateFields.map(resolveFieldDef)
     const fieldNames = fieldDefs.map(function (d) { return d.name })
-    const checkType = rel.modelType || rel.type
-    // Add end1/end2 if applicable
-    const allFieldNames = fieldNames.slice()
-    if (rel.hasEnds) {
-        if (allFieldNames.indexOf('end1') === -1) allFieldNames.push('end1')
-        if (allFieldNames.indexOf('end2') === -1) allFieldNames.push('end2')
-    }
+    const checkTypes = relationTypes(rel)
+    const allFieldNames = relationUpdateFields(rel)
 
     return function (params, query, body, reqInfo) {
         const checks = [h.checkUnknownFields(body, allFieldNames)]
@@ -1235,49 +1769,81 @@ function makeUpdateRelation(config, rel) {
         const err = h.validate(checks)
         if (err) return h.validationError(err, reqInfo, body)
 
+        const valErr = checkFieldValues(body, fieldDefs)
+        if (valErr) return h.validationError(valErr, reqInfo, body)
+
         if (Object.keys(body).length === 0) {
             return h.validationError('At least one field must be provided. Allowed fields: ' + allFieldNames.join(', '), reqInfo, body)
         }
 
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: Object.assign({}, reqInfo, { body: body }) }
         }
 
-        const updated = []
-        fieldNames.forEach(function (f) {
-            if (body[f] !== undefined && f !== 'end1' && f !== 'end2') {
-                app.engine.setProperty(elem, f, body[f])
-                updated.push(f)
+        // Resolve endpoint moves before writing anything: a bad id must not
+        // leave the relation half-moved, with one end rewritten and the other
+        // rejected.
+        if (rel.hasEnds) {
+            const endErr = checkEndFieldValues(body, rel.endFields) || checkEndReferences(elem, body)
+            if (endErr) {
+                return h.validationError(endErr, reqInfo, body)
+            }
+        }
+
+        const report = h.createWriteReport()
+        // Write to d.prop, not d.name: a field may expose a different parameter
+        // name than the model property it sets. makeUpdateResource already does
+        // this; this path used to ignore prop, which silently wrote nothing.
+        fieldDefs.forEach(function (d) {
+            if (body[d.name] !== undefined && d.name !== 'end1' && d.name !== 'end2') {
+                h.applyProperty(report, elem, d.prop, body[d.name], d.name)
             }
         })
 
         if (rel.hasEnds) {
-            if (body.end1 && elem.end1) {
-                applyEndFields(elem.end1, body.end1, rel.endFields)
-                updated.push('end1')
-            }
-            if (body.end2 && elem.end2) {
-                applyEndFields(elem.end2, body.end2, rel.endFields)
-                updated.push('end2')
-            }
+            ['end1', 'end2'].forEach(function (endName) {
+                if (!body[endName]) {
+                    return
+                }
+                if (elem[endName]) {
+                    // checkEndReferences ran first, so this cannot fail on a bad
+                    // reference. Report anything it does return rather than
+                    // dropping it — a silently discarded error is the failure
+                    // this whole endpoint is being fixed for.
+                    const endErr2 = applyEndFields(elem[endName], body[endName], rel.endFields, report, endName, elem)
+                    if (endErr2) {
+                        h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined, endErr2)
+                    }
+                } else {
+                    h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                        'this relation has no ' + endName + ' to write to')
+                }
+            })
+        } else {
+            ['end1', 'end2'].forEach(function (endName) {
+                if (body[endName] !== undefined) {
+                    h.reportIgnoredWrite(report, endName, JSON.stringify(body[endName]), undefined,
+                        'this relation type has no ends')
+                }
+            })
         }
 
         const relSerializer = rel.serialize || function (e) { return defaultSerializeRelation(e, rel) }
-        return {
+        return h.attachWriteReport({
             success: true,
-            message: 'Updated ' + rel.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '" (fields: ' + updated.join(', ') + ')',
+            message: h.writeReportMessage('Updated ' + rel.name.replace(/-/g, ' ') + ' "' + (elem.name || params.id) + '"', report),
             request: Object.assign({}, reqInfo, { body: body }),
             data: relSerializer(elem)
-        }
+        }, report)
     }
 }
 
 function makeDeleteRelation(config, rel) {
-    const checkType = rel.modelType || rel.type
+    const checkTypes = relationTypes(rel)
     return function (params, query, body, reqInfo) {
         const elem = h.findById(params.id)
-        if (!elem || elem.constructor.name !== checkType) {
+        if (!elem || checkTypes.indexOf(elem.constructor.name) === -1) {
             return { success: false, error: rel.name.replace(/-/g, ' ') + ' not found: ' + params.id, request: reqInfo }
         }
 
@@ -1387,5 +1953,7 @@ module.exports = {
     defaultSerializeNode: defaultSerializeNode,
     defaultSerializeRelation: defaultSerializeRelation,
     defaultSerializeChild: defaultSerializeChild,
-    serializeEnd: serializeEnd
+    serializeEnd: serializeEnd,
+    NAVIGABLE_KINDS: NAVIGABLE_KINDS,
+    AGGREGATION_KINDS: AGGREGATION_KINDS
 }

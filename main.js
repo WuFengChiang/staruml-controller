@@ -3,10 +3,24 @@
  *
  * Provides an HTTP server within StarUML to allow remote control
  * of ER diagrams via REST API.
+ *
+ * StarUML 8 runs this file in QuickJS without Node.js, and require() throws
+ * for every module (docs.staruml.io/developing-extensions/scripting-api/,
+ * "Limitations"). There the HTTP server cannot exist: the MCP servers run the
+ * route code through StarUML 8's own API server instead. So on StarUML 8 this
+ * file loads nothing and only explains that in place of the server commands.
  */
 
-const http = require('http')
-const apiHandler = require('./api-handler')
+const IS_STARUML_8 = parseInt(String(app.version || ''), 10) >= 8
+
+const http = IS_STARUML_8 ? null : require('http')
+const apiHandler = IS_STARUML_8 ? null : require('./api-handler')
+
+const STARUML_8_MESSAGE =
+  'StarUML 8 does not need the StarUML Controller server.\n\n' +
+  'The MCP servers reach StarUML 8 through its built-in API server ' +
+  '(Preferences > API Server, port 58321 by default). ' +
+  'StarUML asks once per start to allow "StarUML Controller MCP".'
 
 const DEFAULT_PORT = 12345
 let server = null
@@ -184,6 +198,14 @@ function handleStopServer() {
  * Initialize the extension
  */
 function init() {
+  if (IS_STARUML_8) {
+    const explain = function () {
+      app.dialogs.showInfoDialog(STARUML_8_MESSAGE)
+    }
+    app.commands.register('controller:start-server', explain)
+    app.commands.register('controller:stop-server', explain)
+    return
+  }
   app.commands.register('controller:start-server', handleStartServer)
   app.commands.register('controller:stop-server', handleStopServer)
 }
