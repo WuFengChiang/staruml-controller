@@ -33,6 +33,7 @@ Designed for integration with AI tools such as Claude Code (via MCP) to programm
 ## Supported Versions
 
 - Tested on StarUML v7 (should also work on v6)
+- StarUML v8: the HTTP server cannot run, because StarUML 8 runs extensions without Node.js and `require()` always throws there. The route code runs through StarUML 8's built-in API server instead (port 58321): the `staruml-controller-mcp-core` package bundles this repository and sends it with `POST /execute_script`. On StarUML 8, **Tools > StarUML Controller > Start Server...** only shows a message saying so. Endpoints that read or write files do not work on StarUML 8 yet; see `docs/STARUML-V8-MIGRATION-ASSESSMENT-2026-11-20.md`.
 
 ## Features
 
