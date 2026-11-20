@@ -2498,6 +2498,76 @@ function deleteRelationship(id, reqInfo) {
 
 // --- Project ---
 
+/**
+ * StarUML 8 runs scripts in QuickJS without Node.js: no fs, path or crypto,
+ * and app.project.save/load/importFromFile/exportToFile are gone
+ * (docs.staruml.io/developing-extensions/scripting-api/, "Limitations").
+ * Handlers that touch files branch on this.
+ */
+function isStarUML8() {
+    return parseInt(String(app.version || ''), 10) >= 8
+}
+
+/**
+ * Save the open project to its own file on StarUML 8, through the
+ * project:save command, as the Scripting API docs say to.
+ *
+ * Measured on 8.1.0 with a project that has a filename: project:save wrote the
+ * file before the command returned (about 20 ms for a small project), with no
+ * dialog, and isModified() was false in the same call. A project without a
+ * filename would need a save dialog, and the command cannot be given a path,
+ * so that case and a path other than the project's own file are refused rather
+ * than left waiting on a dialog.
+ */
+function saveProjectStarUML8(body, reqInfoWithBody) {
+    const filename = app.project.getFilename()
+    if (!filename) {
+        return {
+            success: false,
+            error: 'The project has never been saved, so it has no file to save to. ' +
+                'On StarUML 8 the first save needs the Save dialog: save it once in StarUML (File > Save As), then call this again.',
+            request: reqInfoWithBody
+        }
+    }
+    if (body.path && body.path !== filename) {
+        return {
+            success: false,
+            error: 'On StarUML 8 a project can only be saved to its own file ("' + filename + '"). ' +
+                'Saving to another path needs the Save As dialog. Omit "path" to save to the project\'s file, ' +
+                'or use POST /api/project/snapshot to write a copy elsewhere.',
+            request: reqInfoWithBody
+        }
+    }
+    const wasModified = readModifiedFlag()
+    try {
+        app.commands.execute('project:save')
+    } catch (e) {
+        return {
+            success: false,
+            error: 'Failed to save project: ' + (e.message || String(e)),
+            request: reqInfoWithBody
+        }
+    }
+    const stillModified = readModifiedFlag()
+    if (stillModified) {
+        return {
+            success: false,
+            error: 'StarUML did not finish saving: the project is still marked as modified after project:save. ' +
+                'Check StarUML for a dialog or an error.',
+            request: reqInfoWithBody,
+            data: { path: filename }
+        }
+    }
+    return {
+        success: true,
+        message: wasModified
+            ? 'Project saved to "' + filename + '"'
+            : 'Project saved to "' + filename + '" (it had no unsaved changes)',
+        request: reqInfoWithBody,
+        data: { path: filename, hadUnsavedChanges: wasModified }
+    }
+}
+
 function saveProject(body, reqInfo) {
     const err = validate([
         checkUnknownFields(body, PROJECT_SAVE_ALLOWED_FIELDS),
@@ -2505,6 +2575,10 @@ function saveProject(body, reqInfo) {
     ])
     if (err) {
         return validationError(err, reqInfo, body)
+    }
+
+    if (isStarUML8()) {
+        return saveProjectStarUML8(body, Object.assign({}, reqInfo, { body: body }))
     }
 
     if (!body.path) {
@@ -2668,6 +2742,10 @@ function snapshotProject(body, reqInfo) {
         }
     }
 
+    if (isStarUML8()) {
+        return snapshotProjectStarUML8(reqInfoWithBody)
+    }
+
     const fs = require('fs')
     const nodePath = require('path')
     const crypto = require('crypto')
@@ -2781,6 +2859,50 @@ function snapshotProject(body, reqInfo) {
             error: 'Failed to write snapshot: ' + (e.message || String(e)),
             request: reqInfoWithBody
         }
+    }
+}
+
+/**
+ * Snapshot on StarUML 8: copy the saved project file.
+ *
+ * The StarUML 7 path serialises the model with writeObject() and writes it.
+ * On StarUML 8 the script cannot write files, and serialising a large model
+ * inside StarUML fails: writeObject() on an 86.8 MB project ended in
+ * "InternalError: out of memory" (measured on 8.1.0). So a snapshot is offered
+ * only when the project has no unsaved changes, where the file on disk already
+ * is the model, and the caller's side does the copy.
+ *
+ * The copy is described in `fileOperation`, which the MCP transport
+ * (staruml-controller-mcp-core, staruml8-client.ts) carries out in Node and
+ * removes from the response. The destination is taken from the request there,
+ * not from this field.
+ */
+function snapshotProjectStarUML8(reqInfoWithBody) {
+    const filename = app.project.getFilename()
+    if (!filename) {
+        return {
+            success: false,
+            error: 'The project has never been saved, so there is no file to snapshot. ' +
+                'On StarUML 8 a snapshot copies the saved project file.',
+            request: reqInfoWithBody
+        }
+    }
+    if (readModifiedFlag()) {
+        return {
+            success: false,
+            error: 'The project has unsaved changes. On StarUML 8 a snapshot copies the saved project file, ' +
+                'because serialising a large model inside StarUML runs out of memory. ' +
+                'Save first with POST /api/project/save, then take the snapshot.',
+            request: reqInfoWithBody,
+            data: { projectFilename: filename, modified: true }
+        }
+    }
+    return {
+        success: true,
+        message: 'Wrote a snapshot of the saved project to the requested path. The open project is unchanged.',
+        request: reqInfoWithBody,
+        data: { projectFilename: filename, modified: false },
+        fileOperation: { kind: 'copy', from: filename, protect: filename }
     }
 }
 
@@ -8161,7 +8283,7 @@ function closeProject(reqInfo) {
     // system log recorded applicationShouldTerminate: YES and "Termination
     // complete" at the moment of the call, and the user had not quit it.
     // A caller asking to close the project does not mean to quit StarUML.
-    if (parseInt(String(app.version || ''), 10) >= 8) {
+    if (isStarUML8()) {
         return {
             success: false,
             error: 'Refused: on StarUML 8, project:close quits the whole application. ' +
@@ -8198,6 +8320,31 @@ function exportFragment(body, reqInfo) {
     const element = findById(body.elementId)
     if (!element) {
         return validationError('Element not found: ' + body.elementId, reqInfo, body)
+    }
+
+    if (isStarUML8()) {
+        // exportToFile() is gone on StarUML 8. writeObject() gives the element
+        // and its children as .mdj JSON, which the docs name as the input of
+        // importFromJson(), the StarUML 8 import. That this is byte-for-byte what
+        // StarUML 7's exportToFile() wrote is not verified. The MCP transport
+        // writes the content (see snapshotProjectStarUML8).
+        let content
+        try {
+            content = app.repository.writeObject(element)
+        } catch (e) {
+            return {
+                success: false,
+                error: 'Failed to export fragment: ' + (e.message || String(e)),
+                request: Object.assign({}, reqInfo, { body: body })
+            }
+        }
+        return {
+            success: true,
+            message: 'Exported element "' + (element.name || body.elementId) + '" to the requested path',
+            request: Object.assign({}, reqInfo, { body: body }),
+            data: { elementId: body.elementId },
+            fileOperation: { kind: 'write', content: content, protect: app.project.getFilename() }
+        }
     }
 
     try {

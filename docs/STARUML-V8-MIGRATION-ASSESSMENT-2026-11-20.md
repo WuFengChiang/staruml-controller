@@ -8,7 +8,7 @@
 - 25 個 MCP 不必各自修改。它們都透過符號連結使用同一份 `staruml-controller-mcp-core`，自己沒有發 HTTP 請求的程式碼。所有請求都經過 `mcp-core/src/http-client.ts` 的 `request()`，只要換掉這一個傳輸層。
 - 現有的路由程式碼（`api-handler.js`、`ddl-generator.js`、`handlers/*`）可以整包打包 (bundle) 成一段腳本，送進 StarUML 8 執行，不必重寫。
 - 在空白專案上透過暫時代理跑 `test/test_all_endpoints.sh`，428 個案例通過 416 個。失敗的 12 個全都屬於「檔案」與「指令」類。
-- 跟檔案有關的 9 個端點必須改寫。StarUML 8 的腳本不能讀寫檔案。
+- StarUML 8 的腳本不能讀寫檔案。存檔（存回原檔）、快照、匯出片段已改由 StarUML 指令或 MCP 端（Node）處理，並實測通過。開檔、匯入、圖片匯出、全部匯出、DDL 仍然失敗。
 - `POST /api/validate` 與 Markdown 匯出在 StarUML 8 找不到對應的功能。
 - 只檢查 `success: true` 會漏掉一類問題：StarUML 8 讀 view 的 `points` 時，拿到的是沒有方法的複本。這讓邊線標籤定位失效，也讓修改邊線點座標的寫法默默失效。`test/verify_gaps_live.py` 的語意檢查抓到了這個問題。
 - 上游 `pontasan/staruml-controller` 最新的 2.0.0 版（2026-09-21）同樣在 `main.js` 載入 `http`、`crypto`、`electron`，也不支援 StarUML 8。
@@ -133,9 +133,23 @@ StarUML 8 的 `app.diagrams.getEditor()` 回傳一個空物件。實測它沒有
 | 寫入 | 邊線標籤定位、邊線點座標 | 失效 | 見「API 相容性」的 `points` 一節 |
 | 寫入 | `POST /api/undo`、`/api/redo` | 有執行，但回報錯誤 | 程式讀取的內部 `_undoStack` 在 StarUML 8 不存在，回傳的 `stackSizeBefore` 與 `stackSizeAfter` 都是 `null`。要改用文件列出的 `canUndo()`、`canRedo()` |
 | 寫入 | 循序圖訊息的 y 座標被調整時回報 `clamped` | 失效 | `verify_gaps_live.py` 的 Gap 4 拿到 `null`。原因待查 |
-| 檔案 | `POST /api/project/snapshot` | 目前失敗，必須改寫 | 經 MCP 實測回傳 `Node module "path" is not available in StarUML 8 (resolve)`。暫時代理用以下做法驗證可行，但正式的傳輸層還沒有這段：腳本回傳 `writeObject(project)` 的 JSON，由 Node 端寫檔並比對檢查碼 |
-| 專案 | `POST /api/project/new` | 已修正並實測 | 見下方說明 |
-| 專案 | `POST /api/project/close` | 在 StarUML 8 拒絕執行 | 指令會結束整個 StarUML，見下方說明 |
+| 檔案 | `POST /api/project/snapshot` | 已修正並實測，有限制 | 只在沒有未存修改時可用：由 MCP 端（Node）複製已存的專案檔，並比對 sha256。有未存修改時拒絕，請先存檔。原因見下方「存檔、快照與匯出」 |
+| 專案 | `POST /api/project/new` | 已修正並實測 | 見下方「新專案與關閉專案」 |
+| 專案 | `POST /api/project/close` | 在 StarUML 8 拒絕執行 | 指令會結束整個 StarUML，見下方「新專案與關閉專案」 |
+| 檔案 | `POST /api/project/export` | 已修正並實測 | 腳本回傳 `writeObject(element)`，由 MCP 端寫檔。跟 StarUML 7 的 `exportToFile()` 寫出的內容是否完全相同，待確認 |
+| 檔案 | `POST /api/erd/postgresql/ddl` | 必須改寫 | 讓 `ddl-generator.js` 回傳文字，由 MCP 端寫檔（推論可行） |
+| 檔案 | `POST /api/diagrams/:id/export` | 必須改寫 | PNG 可改用官方的 `/get_diagram_image_by_id` 取得 base64 再寫檔。SVG、JPEG、PDF 待確認 |
+| 檔案 | `POST /api/project/save` | 已修正並實測，有限制 | 只能存回專案自己的檔案，見下方「存檔、快照與匯出」 |
+| 檔案 | `POST /api/project/open` | 必須改寫 | 實測 `app.commands.execute('project:open', '<路徑>')` 不會開啟該檔，專案沒變。推論它改跳開檔視窗。可能的方向：由 MCP 端讀檔，再呼叫 `app.project.loadFromJson()`，但大專案可能同樣記憶體不足，`getFilename()` 是否指向原檔也待確認 |
+| 檔案 | `POST /api/project/import` | 必須改寫 | 改用 `project:import-fragment` 指令或 `readObject()`。可不可行待確認 |
+| 檔案 | `POST /api/project/export-all` | 必須改寫 | 用 `project:export-diagram-all-to-*` 指令，或逐張圖走 PNG 做法。待確認 |
+| 檔案 | `POST /api/project/export-doc` | HTML 可修，Markdown 無對應 | 實測 `app.commands.execute('html-export:export', '<絕對路徑>')` 不跳對話框，直接寫出 HTML。目前失敗的原因是 `api-handler.js:8918` 的 `require('path')`，改成自己檢查絕對路徑即可。`markdown:export` 指令在 StarUML 8 不存在 |
+| 指令 | `POST /api/validate` | 無對應 | `model:validate` 指令在 StarUML 8 不存在（實測 369 個指令 ID 中沒有） |
+| 指令 | `POST /api/views/align` | 指令存在 | `VALID_ALIGNMENT_ACTIONS` 的 13 個動作，在 StarUML 8 都有對應的 `alignment:*` 指令 |
+| 指令 | `POST /api/diagrams/generate` | 指令存在 | 4 個 `diagram-generator:*` ID 與 `VALID_GENERATOR_TYPES` 完全相同 |
+| 指令 | `POST /api/mermaid/import` | 參數格式要改 | 實測 StarUML 8 的 `mermaid:generate-diagram` 收物件 `{code: '<Mermaid 原始碼>'}`。照舊傳字串會丟出 `Unsupported diagram type`。物件裡的 `parent` 有沒有作用待確認 |
+
+### 新專案與關閉專案
 
 `project/new` 與 `project/close` 在 StarUML 8.1.0 的實測結果：
 
@@ -152,19 +166,37 @@ StarUML 8 的 `app.diagrams.getEditor()` 回傳一個空物件。實測它沒有
 - 只比對物件：StarUML 8 會原地換掉同一個物件的內容。
 
 修正後在 StarUML 8.1.0 透過 MCP 實測：沒有未存修改時回報成功，有未存修改時回報等待使用者確認，`project/close` 被拒絕而且 StarUML 照常運作。
-| 檔案 | `POST /api/project/export` | 必須改寫 | 腳本回傳 `writeObject(element)`，由 MCP 端寫檔（推論可行） |
-| 檔案 | `POST /api/erd/postgresql/ddl` | 必須改寫 | 讓 `ddl-generator.js` 回傳文字，由 MCP 端寫檔（推論可行） |
-| 檔案 | `POST /api/diagrams/:id/export` | 必須改寫 | PNG 可改用官方的 `/get_diagram_image_by_id` 取得 base64 再寫檔。SVG、JPEG、PDF 待確認 |
-| 檔案 | `POST /api/project/save`、`/open`、`/import` | 目前失敗，必須改寫 | 經 MCP 實測回傳 `not a function`，沒有寫檔，也沒有跳對話框。以下是各自的改寫方向 |
-| 檔案 | `POST /api/project/save` | 必須改寫 | 官方文件建議改用 `project:save` 指令。另存新檔要用 `project:save-as`，它吃不吃路徑參數待確認 |
-| 檔案 | `POST /api/project/open` | 必須改寫 | 由 MCP 端讀檔，再呼叫官方文件列出的 `app.project.loadFromJson()`。之後 `getFilename()` 是否指向原檔待確認 |
-| 檔案 | `POST /api/project/import` | 必須改寫 | 改用 `project:import-fragment` 指令或 `readObject()`。可不可行待確認 |
-| 檔案 | `POST /api/project/export-all` | 必須改寫 | 用 `project:export-diagram-all-to-*` 指令，或逐張圖走 PNG 做法。待確認 |
-| 檔案 | `POST /api/project/export-doc` | HTML 可修，Markdown 無對應 | 實測 `app.commands.execute('html-export:export', '<絕對路徑>')` 不跳對話框，直接寫出 HTML。目前失敗的原因是 `api-handler.js:8918` 的 `require('path')`，改成自己檢查絕對路徑即可。`markdown:export` 指令在 StarUML 8 不存在 |
-| 指令 | `POST /api/validate` | 無對應 | `model:validate` 指令在 StarUML 8 不存在（實測 369 個指令 ID 中沒有） |
-| 指令 | `POST /api/views/align` | 指令存在 | `VALID_ALIGNMENT_ACTIONS` 的 13 個動作，在 StarUML 8 都有對應的 `alignment:*` 指令 |
-| 指令 | `POST /api/diagrams/generate` | 指令存在 | 4 個 `diagram-generator:*` ID 與 `VALID_GENERATOR_TYPES` 完全相同 |
-| 指令 | `POST /api/mermaid/import` | 參數格式要改 | 實測 StarUML 8 的 `mermaid:generate-diagram` 收物件 `{code: '<Mermaid 原始碼>'}`。照舊傳字串會丟出 `Unsupported diagram type`。物件裡的 `parent` 有沒有作用待確認 |
+
+### 存檔、快照與匯出
+
+StarUML 8 的腳本不能寫檔，所以這三個端點改成分工處理：
+
+| 端點 | 誰寫檔 | 做法與限制 |
+|---|---|---|
+| `project/save` | StarUML 本體 | 執行 `project:save` 指令，這是官方 Scripting API 文件建議的做法。執行後讀 `isModified()`，變成 `false` 才算成功。專案從沒存過、或 `path` 不是專案自己的檔案時，就拒絕，因為這兩種情況都需要「另存新檔」對話框 |
+| `project/snapshot` | MCP 端（Node） | controller 在回應裡附上 `fileOperation: {kind: "copy", from: <專案檔>}`，由傳輸層複製檔案。只在沒有未存修改時提供 |
+| `project/export` | MCP 端（Node） | controller 附上 `fileOperation: {kind: "write", content: writeObject(element)}`，由傳輸層寫檔 |
+
+傳輸層（`staruml-controller-mcp-core/src/staruml8-client.ts`）處理 `fileOperation` 的規則如下：
+
+- 只接受 `POST /api/project/snapshot` 與 `POST /api/project/export` 提出的 `fileOperation`，其他端點提出的一律拒絕。
+- 目標路徑一律取自原始請求的 `path`，不採用 StarUML 回傳的內容。
+- 不能寫到開著的專案檔，連透過符號連結指過去的也不行。
+- 先寫到同一個資料夾的暫存檔，再改名換上，最後讀回來比對大小與 sha256。
+- `fileOperation` 不會出現在給呼叫端的回應裡，所以匯出的內容不會回傳。
+
+快照只在沒有未存修改時提供，原因是記憶體上限。在 StarUML 8.1.0 上，對 86.8 MB 的 POS 專案呼叫 `app.repository.writeObject(project)`，等了 8.7 秒後得到 `InternalError: out of memory`。所以「在 StarUML 裡把整個模型序列化成字串」對大專案不可行。StarUML 和專案在這次錯誤後都正常。
+
+在 StarUML 8.1.0 上用測試檔實測：
+
+| 項目 | 結果 |
+|---|---|
+| 直接執行 `project:save` | 同步完成，約 20 毫秒，沒有跳對話框。同一次呼叫裡 `isModified()` 就變成 `false`，磁碟上的檔案內含剛建立的標記類別 |
+| `project:open` 帶路徑 | 沒有開啟該檔，專案沒變 |
+| 經 class MCP 的 10 項檢查 | 全過：不帶路徑存檔、標記寫入磁碟、快照與專案檔 sha256 相同、快照不能寫到專案檔、有未存修改時快照被拒且沒寫檔、存到別的路徑被拒、帶原檔路徑存檔、匯出片段寫檔、回應不含片段內容、`project_close` 被拒 |
+| 離線測試 | 22 項全過，含符號連結防護、資料夾不存在、非 `.mdj` 路徑、不允許的端點提出 `fileOperation` |
+
+還沒有在 86.8 MB 的 POS 專案上，透過 MCP 實測 `save_project`。推論它跟 Cmd+S 走同一個 `project:save` 指令，資料不經過腳本引擎，所以不會遇到上述記憶體上限。
 
 待決定：兩個無對應的端點（`/api/validate` 與 Markdown 匯出）要移除，還是保留並回傳明確的「StarUML 8 不支援」錯誤。
 
@@ -178,6 +210,9 @@ StarUML 8 的 `app.diagrams.getEditor()` 回傳一個空物件。實測它沒有
 - `crud-factory.js` 與 `api-handler.js` 註解寫，部分 factory 函式（例如 `UMLTimeSegment`）會讀 `options.editor.canvas`。StarUML 8 的 editor 沒有 `canvas`。`test_all_endpoints.sh` 沒有建立 `UMLTimeSegment` 的案例，所以這些元素在 StarUML 8 建不建得出來，待實測。
 
 ## 25 個行程與權杖
+
+- 權杖只在 StarUML 這次啟動期間有效。今天每次重啟 StarUML 之後，第一次呼叫都要按一次 Allow。換專案用 File > Open 不必重啟，也就不必再按。
+- StarUML 執行檔裡跟 API 伺服器有關的設定，只找到 `apiServer.runOnStart` 與 `apiServer.port`，沒找到「信任的應用程式」或「永遠允許」之類的設定。這只代表沒找到，不能證明不存在。
 
 - 官方 MCP 把權杖存在行程的記憶體裡。照這樣做的話，StarUML 每次重新啟動後，每個被用到的 MCP 都會跳一次「允許存取」對話框。
 - StarUML 執行檔中有 `Another API access request is waiting for the user` 與 `Too Many Requests` 字串。多個行程同時申請權杖時，可能有部分申請被拒絕（推論）。
@@ -204,6 +239,8 @@ StarUML 8 的 `app.diagrams.getEditor()` 回傳一個空物件。實測它沒有
 5. 循序圖訊息 `clamped` 回報失效的原因。
 6. `verify_gaps_live.py` 在 A-4 之後的項目。
 7. 會讀 `options.editor.canvas` 的元素（例如 `UMLTimeSegment`）在 StarUML 8 建不建得出來。## 附錄：資訊來源
+8. 在 86.8 MB 的 POS 專案上，經 MCP 呼叫 `save_project` 是否同樣不受記憶體上限影響。
+9. `writeObject(element)` 寫出的片段，跟 StarUML 7 的 `exportToFile()` 是否完全相同。
 
 - 官方文件：https://docs.staruml.io/developing-extensions/getting-started/
 - 官方文件：https://docs.staruml.io/developing-extensions/scripting-api/
